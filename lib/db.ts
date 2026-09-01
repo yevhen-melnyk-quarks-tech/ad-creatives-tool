@@ -1,0 +1,115 @@
+import Database from "better-sqlite3";
+import { mkdirSync } from "node:fs";
+import path from "node:path";
+import { dbPath, DATA_ROOT } from "./paths";
+
+// SQLite on the container's volume rather than a managed Postgres: this is a
+// single-container internal tool with one writer (the in-process worker), so an
+// external database would add an operational dependency without buying anything.
+let _db: Database.Database | null = null;
+
+export function db(): Database.Database {
+  if (_db) return _db;
+  mkdirSync(DATA_ROOT, { recursive: true });
+  const d = new Database(dbPath());
+  d.pragma("journal_mode = WAL");
+  d.pragma("foreign_keys = ON");
+  migrate(d);
+  _db = d;
+  return d;
+}
+
+function migrate(d: Database.Database) {
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS projects (
+      id            TEXT PRIMARY KEY,
+      title         TEXT NOT NULL,
+      brief         TEXT NOT NULL,
+      status        TEXT NOT NULL DEFAULT 'draft',
+      scenario_json TEXT,
+      created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- One row per generated artifact (character card, a scene's storyboard, a scene's
+    -- clip). Keeps the approval state the UI gates on, plus the exact prompt used, so
+    -- a bad output is always traceable to the text that produced it.
+    CREATE TABLE IF NOT EXISTS artifacts (
+      id          TEXT PRIMARY KEY,
+      project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      kind        TEXT NOT NULL,          -- 'character_card' | 'storyboard' | 'video' | 'captions' | 'final'
+      scene_id    TEXT,                   -- null for project-wide artifacts
+      file_path   TEXT,
+      prompt      TEXT,
+      attempt     INTEGER NOT NULL DEFAULT 1,
+      approved    INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(project_id, kind, scene_id)
+    );
+
+    -- Every critic run, kept even when it passes: the audit trail is what makes an
+    -- auto-repair loop reviewable rather than a black box.
+    CREATE TABLE IF NOT EXISTS qa_runs (
+      id          TEXT PRIMARY KEY,
+      project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      stage       TEXT NOT NULL,
+      scene_id    TEXT,
+      attempt     INTEGER NOT NULL DEFAULT 1,
+      verdict     TEXT NOT NULL,          -- 'PASS' | 'REVIEW' | 'FAIL' | 'ERROR'
+      report_json TEXT NOT NULL,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS jobs (
+      id          TEXT PRIMARY KEY,
+      project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      kind        TEXT NOT NULL,
+      payload     TEXT NOT NULL DEFAULT '{}',
+      status      TEXT NOT NULL DEFAULT 'queued',  -- queued | running | done | failed | cancelled
+      progress    TEXT,
+      error       TEXT,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      started_at  TEXT,
+      finished_at TEXT
+    );
+
+    -- Spend ledger. Paid video re-rolls are the expensive failure mode, so every
+    -- billable call is recorded against the project that caused it.
+    CREATE TABLE IF NOT EXISTS costs (
+      id          TEXT PRIMARY KEY,
+      project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      provider    TEXT NOT NULL,
+      operation   TEXT NOT NULL,
+      scene_id    TEXT,
+      usd         REAL NOT NULL DEFAULT 0,
+      detail      TEXT,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_jobs_status    ON jobs(status, created_at);
+    CREATE INDEX IF NOT EXISTS idx_qa_project     ON qa_runs(project_id, stage);
+    CREATE INDEX IF NOT EXISTS idx_costs_project  ON costs(project_id);
+  `);
+}
+
+export const uid = () =>
+  `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+
+export function recordCost(row: {
+  projectId: string;
+  provider: string;
+  operation: string;
+  sceneId?: string | null;
+  usd: number;
+  detail?: string;
+}) {
+  db()
+    .prepare(
+      `INSERT INTO costs (id, project_id, provider, operation, scene_id, usd, detail)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(uid(), row.projectId, row.provider, row.operation, row.sceneId ?? null, row.usd, row.detail ?? null);
+}
+
+export const projectSpendUsd = (projectId: string): number =>
+  (db().prepare(`SELECT COALESCE(SUM(usd), 0) AS t FROM costs WHERE project_id = ?`).get(projectId) as { t: number }).t;
