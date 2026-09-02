@@ -28,10 +28,17 @@ RUN npm run build
 FROM base AS runner
 WORKDIR /app
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000
+# HOSTNAME must be pinned to 0.0.0.0. Next's standalone server.js binds to
+# process.env.HOSTNAME, and Docker sets that to the container id — so without this the
+# server listens on that one interface only, boots cleanly, logs "Ready", and every
+# request from the platform's proxy still fails with 502.
+ENV HOSTNAME=0.0.0.0
 # Artifacts live on a mounted volume so work-in-progress survives a redeploy and the
 # folder stays inspectable and prunable.
 ENV DATA_ROOT=/data
-RUN mkdir -p /data && chown -R node:node /data
+# Created so a local `docker run` without a volume still works; on Railway the
+# attached volume is mounted over this path at runtime.
+RUN mkdir -p /data
 
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
@@ -39,7 +46,13 @@ COPY --from=builder /app/.next/static ./.next/static
 # Fonts and the brand logo are read at render time from the working directory.
 COPY --from=builder /app/assets ./assets
 
-USER node
+# No VOLUME directive: Railway rejects it outright ("docker VOLUME is not supported,
+# use Railway Volumes") because it attaches its own volume at this mount path.
+#
+# Runs as root deliberately. Railway mounts the volume at /data owned by root, so a
+# non-root process cannot write the SQLite file or any artifact into it — and dropping
+# privileges after a startup chown needs gosu/su-exec, which would mean another package
+# and a shell wrapper in front of PID 1. This is an internal tool on a trusted network,
+# so the trade is not worth it.
 EXPOSE 3000
-VOLUME ["/data"]
 CMD ["node", "server.js"]
