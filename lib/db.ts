@@ -114,6 +114,11 @@ function migrate(d: Database.Database) {
   // Counts how many times a job has been picked up, to stop an orphaned job that
   // crashes the process from being requeued forever.
   addColumnIfMissing(d, "jobs", "attempts", "INTEGER NOT NULL DEFAULT 0");
+  // Countable progress for the phases that have a known total, so a long job can show
+  // how far along it is instead of only that it is running.
+  addColumnIfMissing(d, "jobs", "progress_step", "INTEGER");
+  addColumnIfMissing(d, "jobs", "progress_total", "INTEGER");
+  addColumnIfMissing(d, "jobs", "progress_label", "TEXT");
 
   // Render resolution for this project's clips. Defaults to 480p: it is markedly
   // cheaper and faster, which matters most while a project is still being iterated on.
@@ -242,3 +247,17 @@ export function releaseSpend(projectId: string, usd: number) {
 /** Recorded spend plus anything currently in flight. What the budget guard must use. */
 export const projectCommittedUsd = (projectId: string): number =>
   projectSpendUsd(projectId) + (reserved.get(projectId) ?? 0);
+
+/**
+ * Publishes countable progress for a job's current phase.
+ *
+ * Lives here, beside the jobs table, rather than in the worker: the pipeline stages
+ * report their own progress, and importing it from the worker made stages and worker
+ * import each other. An ESM cycle happens to work while the call is at runtime, but it
+ * is a trap for whoever touches it next.
+ */
+export function setProgress(jobId: string, label: string, step: number, total: number) {
+  db()
+    .prepare(`UPDATE jobs SET progress_label=?, progress_step=?, progress_total=? WHERE id=?`)
+    .run(label, step, total, jobId);
+}

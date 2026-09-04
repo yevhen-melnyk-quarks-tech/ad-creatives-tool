@@ -19,6 +19,7 @@ type Disclaimer = {
 type Job = {
   id: string; kind: string; status: string; error: string | null;
   progress: string | null; active_scene: string | null; payload: string | null;
+  progress_step: number | null; progress_total: number | null; progress_label: string | null;
 };
 type QaRow = { stage: string; scene_id: string | null; verdict: string; report: CriticReport };
 
@@ -337,21 +338,7 @@ export default function ProjectWorkspace(props: {
         )}
       </section>
 
-      {activeJob && (
-        <div className="mb-6 rounded-lg border border-line-strong bg-surface-muted p-4">
-          <div className="flex items-center justify-between text-sm">
-            <span className="font-medium">
-              {activeJob.kind} — {activeJob.status}
-            </span>
-            <span className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-          </div>
-          {activeJob.progress && (
-            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap text-xs text-ink-muted">
-              {activeJob.progress}
-            </pre>
-          )}
-        </div>
-      )}
+      {activeJob && <RunningBanner job={activeJob} scenes={activeScenesOf(activeJob)} />}
 
       {scenario && (
         <div className={hasLoaded ? "" : "opacity-50 transition-opacity"}>
@@ -628,14 +615,19 @@ export default function ProjectWorkspace(props: {
               </div>
             )}
 
-            <div className="flex flex-wrap gap-2">
-              <Btn onClick={() => startJob("captions")} busy={busy === "captions"}>
-                Build captions
-              </Btn>
+            <div className="flex flex-wrap items-center gap-2">
               <Btn onClick={() => startJob("assemble")} busy={busy === "assemble"}>
                 Assemble final
               </Btn>
+              <Btn variant="muted" onClick={() => startJob("captions")} busy={busy === "captions"}>
+                Rebuild captions only
+              </Btn>
             </div>
+            <p className="mt-2 text-xs text-ink-subtle">
+              Assembling builds captions first whenever they are missing or older than a clip, so this is the only
+              button you need. Rebuilding captions on their own is for refreshing the transcript without re-rendering
+              the video.
+            </p>
             <div className="mt-3">
               <Verdict report={qaFor("assembly")?.report} />
             </div>
@@ -754,6 +746,63 @@ function NoteBox({
 }
 
 /** Inline progress marker, so state is visible without scrolling back up the page. */
+/**
+ * Sticky status bar for whatever is running.
+ *
+ * Sticky because it was not: a job's only indicator sat at the top of the page, and
+ * pressing a button in step 3 or 4 scrolled it out of view — so the app looked like it
+ * had done nothing. It shows the phase, a count where the total is knowable, and the
+ * most recent log line, which is the part that actually tells you the run is alive.
+ */
+function RunningBanner({ job, scenes }: { job: Job; scenes: string[] }) {
+  const lines = (job.progress ?? "").trimEnd().split("\n").filter(Boolean);
+  const last = lines[lines.length - 1] ?? "starting…";
+  const step = job.progress_step;
+  const total = job.progress_total;
+  const pct = step !== null && total !== null && total > 0 ? Math.round((step / total) * 100) : null;
+
+  const KIND_LABEL: Record<string, string> = {
+    character_card: "Character card",
+    storyboards: "Storyboards",
+    storyboard_one: "Storyboard",
+    videos: "Videos",
+    video_one: "Video",
+    captions: "Captions",
+    assemble: "Final assembly",
+  };
+
+  return (
+    <div className="sticky top-0 z-20 -mx-8 mb-6 border-b border-line bg-surface/95 px-8 py-3 backdrop-blur">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+        <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-info-dot" />
+        <span className="font-medium">{KIND_LABEL[job.kind] ?? job.kind}</span>
+        <span className="text-xs text-ink-subtle">
+          {job.status === "queued" ? "queued" : job.progress_label ?? "running"}
+          {pct !== null && ` · ${step}/${total} (${pct}%)`}
+          {scenes.length > 0 && ` · scene ${scenes.join(", ")}`}
+        </span>
+      </div>
+
+      {pct !== null && (
+        <div className="mt-2 h-1 w-full overflow-hidden rounded bg-surface-raised">
+          <div className="h-full rounded bg-info-dot transition-all" style={{ width: `${pct}%` }} />
+        </div>
+      )}
+
+      <p className="mt-1.5 truncate text-xs text-ink-muted" title={last}>
+        {last}
+      </p>
+
+      <details className="mt-1">
+        <summary className="cursor-pointer text-xs text-ink-subtle">full log</summary>
+        <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap text-xs text-ink-muted">
+          {job.progress ?? ""}
+        </pre>
+      </details>
+    </div>
+  );
+}
+
 function JobBadge({ state }: { state: "generating" | "queued" | null }) {
   if (!state) return null;
   const generating = state === "generating";

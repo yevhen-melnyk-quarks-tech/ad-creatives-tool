@@ -1,7 +1,7 @@
-import { writeFile, mkdir } from "node:fs/promises";
+import { writeFile, mkdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { artifact, ensureProjectDirs, safeSceneId } from "../paths";
-import { db, uid, recordCost, projectSpendUsd, getNote, reserveSpend, releaseSpend } from "../db";
+import { db, uid, recordCost, projectSpendUsd, getNote, reserveSpend, releaseSpend, setProgress } from "../db";
 import { generateImage } from "../models/gemini";
 import {
   generateVideo, transcribe, uploadForTranscription,
@@ -371,13 +371,43 @@ export async function runSceneVideo(opts: {
   return { report: outcome.finalReport, accepted: outcome.accepted, path: outPath };
 }
 
+/**
+ * Whether captions.srt is missing, or older than the newest clip.
+ *
+ * Staleness matters as much as absence. Caption timings are absolute offsets into the
+ * concatenated story, so re-rolling any scene shifts every cue after it. A file built
+ * before that re-roll is not slightly off — it is wrong for the whole remainder of the
+ * ad, and nothing about it looks wrong on disk.
+ */
+export async function captionsAreStale(projectId: string, scenario: Scenario): Promise<string | null> {
+  const srt = artifact.captions(projectId);
+  if (!(await exists(srt))) return "none have been built yet";
+
+  const srtTime = (await stat(srt)).mtimeMs;
+  for (const scene of scenario.scenes) {
+    const clip = artifact.video(projectId, scene.id);
+    if (!(await exists(clip))) continue;
+    if ((await stat(clip)).mtimeMs > srtTime) {
+      return `scene ${scene.id}'s clip is newer than the captions, so every cue after it is out of sync`;
+    }
+  }
+  return null;
+}
+
 export async function runCaptions(opts: {
   projectId: string;
   scenario: Scenario;
   log: Log;
+  /** When given, per-scene transcription progress is published against this job. */
+  jobId?: string;
 }): Promise<{ cueCount: number; findings: ReturnType<typeof coverageFindings> }> {
   const transcripts: SceneTranscript[] = [];
   await mkdir(artifact.transcripts(opts.projectId), { recursive: true });
+
+  // Total is the scenes with dialogue, since silent ones are skipped without a call.
+  const needTranscribe = opts.scenario.scenes.filter((s) => s.frames.some((f) => f.dialogue));
+  let transcribed = 0;
+  if (opts.jobId) setProgress(opts.jobId, "transcribing", 0, needTranscribe.length);
 
   for (const scene of opts.scenario.scenes) {
     const clip = artifact.video(opts.projectId, scene.id);
@@ -404,6 +434,7 @@ export async function runCaptions(opts: {
       usd: 0.002,
     });
     transcripts.push({ sceneId: scene.id, durationSeconds: duration, words });
+    if (opts.jobId) setProgress(opts.jobId, "transcribing", ++transcribed, needTranscribe.length);
   }
 
   const result = buildCaptions(opts.scenario.scenes, transcripts);

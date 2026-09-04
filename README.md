@@ -172,6 +172,14 @@ authored data rather than by searching the prose for the word "phone". A scenari
 no `charactersPresent` keeps the old assumption, which is correct for an ordinary
 face-to-face scene.
 
+## Knowing what is running
+
+A running job shows in a sticky bar at the top of the viewport: the phase, a count and
+progress bar where the total is knowable (scenes to generate, clips to render, scenes
+to transcribe), the most recent log line, and the full log behind a disclosure. Sticky
+because it was not — the indicator sat at the top of the page, so pressing a button in
+step 3 or 4 scrolled it out of view and the app looked like it had done nothing.
+
 ## Theming
 
 Light and dark, chosen with the Light / Dark / System control in the header. The
@@ -217,6 +225,19 @@ reference ad does. Types 1 and 3 have no prefix, so their single line moves up i
 that position rather than leaving a blank line above it. Editing the text keeps the
 same rule: a leading "AI-generated." becomes the bold line, anything else is rendered
 as one line rather than guessing where a custom sentence should break.
+
+## Captions and assembly are one action
+
+**Assemble final** is the only button you need. Assembly only ever *read*
+`captions.srt`, so on its own it would burn a stale file or none at all and still
+produce something that looks finished — the caption track simply absent or drifting,
+with nothing on screen to say why. Staleness is the sharper half: cue times are
+absolute offsets into the concatenated story, so re-rolling any scene shifts every cue
+after it.
+
+Assembling therefore rebuilds captions whenever they are missing or older than any
+clip, and says which. **Rebuild captions only** stays available for refreshing the
+transcript without re-rendering the video.
 
 ## Localization set
 

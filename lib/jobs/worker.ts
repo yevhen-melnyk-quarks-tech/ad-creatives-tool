@@ -1,9 +1,9 @@
-import { db, uid, recordCost, recoverOrphanedJobs } from "../db";
+import { db, uid, recordCost, recoverOrphanedJobs, setProgress } from "../db";
 import { mapWithConcurrency } from "../util/concurrency";
 import { setUsageSink } from "../models/usageTracker";
 import { estimateGeminiUsd } from "../models/pricing";
 import { ScenarioSchema, type Scenario } from "../pipeline/types";
-import { runCharacterCard, runStoryboard, runSceneVideo, runCaptions, runAssembly } from "../pipeline/stages";
+import { runCharacterCard, runStoryboard, runSceneVideo, runCaptions, runAssembly, captionsAreStale } from "../pipeline/stages";
 
 /**
  * In-process job runner.
@@ -86,7 +86,8 @@ async function tick() {
   db()
     .prepare(
       `UPDATE jobs SET status='running', started_at=datetime('now'),
-                       attempts = attempts + 1, active_scene = NULL
+                       attempts = attempts + 1, active_scene = NULL,
+                       progress_step = NULL, progress_total = NULL, progress_label = NULL
         WHERE id = ?`
     )
     .run(job.id);
@@ -205,6 +206,8 @@ async function execute(
 
       // Scene-prefixed logging, because parallel scenes interleave and an unprefixed
       // line would be impossible to attribute.
+      let doneCount = 0;
+      setProgress(jobId, "storyboards", 0, todo.length);
       const outcomes = await mapWithConcurrency(todo, CONCURRENCY_IMAGE, async (scene) => {
         markActive(jobId, scene.id);
         const slog = (m: string) => log(`[${scene.id}] ${m.trim()}`);
@@ -214,6 +217,7 @@ async function execute(
           return r;
         } finally {
           clearActive(jobId, scene.id);
+          setProgress(jobId, "storyboards", ++doneCount, todo.length);
         }
       });
 
@@ -272,6 +276,8 @@ async function execute(
       });
       log(`Rendering ${toRender.length} clip(s), ${Math.min(CONCURRENCY_VIDEO, toRender.length)} at a time.`);
 
+      let doneVideos = 0;
+      setProgress(jobId, "clips", 0, toRender.length);
       const videoOutcomes = await mapWithConcurrency(toRender, CONCURRENCY_VIDEO, async (scene) => {
         markActive(jobId, scene.id);
         const slog = (m: string) => log(`[${scene.id}] ${m.trim()}`);
@@ -281,6 +287,7 @@ async function execute(
           return r;
         } finally {
           clearActive(jobId, scene.id);
+          setProgress(jobId, "clips", ++doneVideos, toRender.length);
         }
       });
 
@@ -306,13 +313,29 @@ async function execute(
 
     case "captions": {
       setStatus(projectId, "captions");
-      const r = await runCaptions({ projectId, scenario, log });
+      const r = await runCaptions({ projectId, scenario, log, jobId });
       for (const f of r.findings) log(`  ${f.blocking ? "BLOCKING" : "note"}: ${f.detail}`);
       return;
     }
 
     case "assemble": {
       setStatus(projectId, "assembling");
+
+      // Assembly only READS captions.srt. Left to itself it would happily burn a
+      // stale file, or none at all, and the result looks finished either way — the
+      // caption track is simply absent or drifting, with nothing to indicate why.
+      // So captions are rebuilt here whenever they are missing or older than a clip.
+      const stale = await captionsAreStale(projectId, scenario);
+      if (stale) {
+        log(`Captions need rebuilding first — ${stale}.`);
+        setProgress(jobId, "captions", 0, 1);
+        const c = await runCaptions({ projectId, scenario, log });
+        for (const f of c.findings) log(`  ${f.blocking ? "BLOCKING" : "note"}: ${f.detail}`);
+      } else {
+        log("Captions are up to date.");
+      }
+
+      setProgress(jobId, "assembling", 0, 1);
       const r = await runAssembly({ projectId, scenario, log });
       for (const f of r.report.findings) log(`  ${f.blocking ? "BLOCKING" : "note"}: ${f.detail}`);
       log(`Assembly ${r.report.verdict}: ${r.report.summary}`);
