@@ -12,7 +12,7 @@ type SpendRow = { provider: string; operation: string; calls: number; usd: numbe
 type Note = { kind: string; scene_id: string | null; note: string };
 type Job = {
   id: string; kind: string; status: string; error: string | null;
-  progress: string | null; active_scene: string | null;
+  progress: string | null; active_scene: string | null; payload: string | null;
 };
 type QaRow = { stage: string; scene_id: string | null; verdict: string; report: CriticReport };
 
@@ -136,20 +136,40 @@ export default function ProjectWorkspace(props: {
   const noteFor = (kind: string, sceneId: string | null = null) =>
     notes.find((n) => n.kind === kind && n.scene_id === sceneId)?.note ?? "";
 
-  const activeJob = jobs.find((j) => j.status === "running" || j.status === "queued");
+  // The RUNNING job specifically, not just the newest unfinished one. Ordering is
+  // created_at DESC, so queueing a re-roll while a batch was running made the newer
+  // queued job win — and a queued job has no active scene yet, so the badge vanished
+  // from every row even though work was in progress.
+  const runningJob = jobs.find((j) => j.status === "running");
+  const queuedJobs = jobs.filter((j) => j.status === "queued");
+  const activeJob = runningJob ?? queuedJobs[queuedJobs.length - 1];
+
+  const sceneOfPayload = (j: Job): string | null => {
+    try {
+      return (JSON.parse(j.payload ?? "{}") as { sceneId?: string }).sceneId ?? null;
+    } catch {
+      return null;
+    }
+  };
   const card = find("character_card");
   const cardApproved = card?.approved === 1;
   const approvedSheets = artifacts.filter((a) => a.kind === "storyboard" && a.approved === 1).length;
 
-  // A scene is "generating" when the running job says so, or when a single-scene job
-  // for it is still queued and has not reported an active scene yet.
-  const generatingScene = (sceneId: string, kinds: string[]) =>
-    Boolean(
-      activeJob &&
-        kinds.includes(activeJob.kind) &&
-        (activeJob.active_scene === sceneId ||
-          (activeJob.active_scene === null && busy === `${activeJob.kind}:${sceneId}`))
-    );
+  /** "generating" if the running job is on this scene; "queued" if one is waiting for it. */
+  const sceneJobState = (sceneId: string, kinds: string[]): "generating" | "queued" | null => {
+    if (runningJob && kinds.includes(runningJob.kind)) {
+      if (runningJob.active_scene === sceneId) return "generating";
+      // A bulk job that has not named a scene yet is still about to cover this one.
+      if (runningJob.active_scene === null && !sceneOfPayload(runningJob)) return "queued";
+    }
+    for (const j of queuedJobs) {
+      if (!kinds.includes(j.kind)) continue;
+      const target = sceneOfPayload(j);
+      if (target === sceneId || target === null) return "queued";
+    }
+    if (busy && kinds.some((k) => busy === `${k}:${sceneId}`)) return "queued";
+    return null;
+  };
 
   const sheetsMissing = scenario
     ? scenario.scenes.filter((sc) => !find("storyboard", sc.id)).length
@@ -350,7 +370,7 @@ export default function ProjectWorkspace(props: {
                             <span className="ml-2 text-xs font-normal text-neutral-500">attempt {sheet.attempt}</span>
                           )}
                         </span>
-                        {generatingScene(scene.id, ["storyboards", "storyboard_one"]) && <GeneratingBadge />}
+                        <JobBadge state={sceneJobState(scene.id, ["storyboards", "storyboard_one"])} />
                       </p>
                       <Verdict report={report} />
                       <AppliedFixes artifact={sheet} />
@@ -419,7 +439,7 @@ export default function ProjectWorkspace(props: {
                         Scene {scene.id}
                         <span className="ml-2 text-xs font-normal text-neutral-500">{scene.durationSeconds}s</span>
                       </span>
-                      {generatingScene(scene.id, ["videos", "video_one"]) && <GeneratingBadge />}
+                      <JobBadge state={sceneJobState(scene.id, ["videos", "video_one"])} />
                     </p>
                     {clip ? (
                       <video src={fileUrl(clip.file_path)} controls className="mt-2 w-full rounded" />
@@ -554,12 +574,18 @@ function NoteBox({
   );
 }
 
-/** Inline "working on this one" marker, so progress is visible without scrolling up. */
-function GeneratingBadge() {
+/** Inline progress marker, so state is visible without scrolling back up the page. */
+function JobBadge({ state }: { state: "generating" | "queued" | null }) {
+  if (!state) return null;
+  const generating = state === "generating";
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
-      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-600" />
-      generating
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${
+        generating ? "bg-blue-100 text-blue-800" : "bg-neutral-200 text-neutral-600"
+      }`}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${generating ? "animate-pulse bg-blue-600" : "bg-neutral-500"}`} />
+      {state}
     </span>
   );
 }

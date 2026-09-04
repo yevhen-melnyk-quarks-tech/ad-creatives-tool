@@ -21,7 +21,7 @@ export async function GET(_req: Request, { params }: Ctx) {
     .prepare(`SELECT kind, scene_id, file_path, attempt, approved, prompt_additions FROM artifacts WHERE project_id = ?`)
     .all(id);
   const jobs = db()
-    .prepare(`SELECT id, kind, status, error, active_scene, created_at, finished_at FROM jobs WHERE project_id = ? ORDER BY created_at DESC LIMIT 20`)
+    .prepare(`SELECT id, kind, status, error, active_scene, payload, created_at, finished_at FROM jobs WHERE project_id = ? ORDER BY created_at DESC LIMIT 20`)
     .all(id);
 
   // Disk usage is surfaced deliberately: the brief for this tool asked for visible
