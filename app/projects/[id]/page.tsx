@@ -11,7 +11,7 @@ type Ctx = { params: Promise<{ id: string }> };
 export default async function ProjectPage({ params }: Ctx) {
   const { id } = await params;
   const project = db().prepare(`SELECT * FROM projects WHERE id=?`).get(id) as
-    | { id: string; title: string; status: string; scenario_json: string | null; brief: string | null }
+    | { id: string; title: string; status: string; scenario_json: string | null; brief: string | null; video_resolution: string | null }
     | undefined;
   if (!project) notFound();
 
@@ -26,6 +26,7 @@ export default async function ProjectPage({ params }: Ctx) {
       scenario={parsed?.success ? parsed.data : null}
       scenarioError={parsed && !parsed.success ? "Stored scenario no longer matches the schema." : null}
       initialBrief={project.brief ?? ""}
+      initialResolution={project.video_resolution === "720p" ? "720p" : "480p"}
       initialSpendUsd={projectSpendUsd(id)}
       initialDiskHuman={humanBytes(bytes)}
     />

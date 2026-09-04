@@ -5,6 +5,7 @@ import { ScenarioSchema } from "@/lib/pipeline/types";
 import { normalizeScenario } from "@/lib/pipeline/normalize";
 import { parseBrief } from "@/lib/agents/briefParser";
 import { RATES_ARE_DEFAULTS } from "@/lib/models/pricing";
+import { VIDEO_RESOLUTIONS, SEEDANCE_480_RATE_IS_ESTIMATE, type VideoResolution } from "@/lib/models/replicate";
 
 export const dynamic = "force-dynamic";
 
@@ -46,6 +47,7 @@ export async function GET(_req: Request, { params }: Ctx) {
     spendBreakdown,
     notes: listNotes(id),
     spendRatesAreDefaults: RATES_ARE_DEFAULTS,
+    resolution480IsEstimate: SEEDANCE_480_RATE_IS_ESTIMATE,
     diskBytes: bytes,
     diskHuman: humanBytes(bytes),
   });
@@ -54,7 +56,7 @@ export async function GET(_req: Request, { params }: Ctx) {
 export async function PATCH(req: Request, { params }: Ctx) {
   const { id } = await params;
   const body = (await req.json().catch(() => null)) as
-    | { scenario?: unknown; title?: string; brief?: string }
+    | { scenario?: unknown; title?: string; brief?: string; videoResolution?: string }
     | null;
   if (!body) return NextResponse.json({ error: "invalid body" }, { status: 400 });
 
@@ -104,6 +106,19 @@ export async function PATCH(req: Request, { params }: Ctx) {
 
   if (body.title) {
     db().prepare(`UPDATE projects SET title=?, updated_at=datetime('now') WHERE id=?`).run(body.title, id);
+  }
+  if (body.videoResolution !== undefined) {
+    if (!VIDEO_RESOLUTIONS.includes(body.videoResolution as VideoResolution)) {
+      return NextResponse.json(
+        { error: `videoResolution must be one of ${VIDEO_RESOLUTIONS.join(", ")}` },
+        { status: 400 }
+      );
+    }
+    // Applies to clips generated from now on; existing clips keep whatever they
+    // were rendered at, so a project can end up mixing resolutions.
+    db()
+      .prepare(`UPDATE projects SET video_resolution=?, updated_at=datetime('now') WHERE id=?`)
+      .run(body.videoResolution, id);
   }
   return NextResponse.json({ ok: true, warnings });
 }

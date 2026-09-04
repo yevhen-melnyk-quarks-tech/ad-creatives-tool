@@ -31,6 +31,7 @@ export default function ProjectWorkspace(props: {
   scenario: Scenario | null;
   scenarioError: string | null;
   initialBrief: string;
+  initialResolution: "480p" | "720p";
   initialSpendUsd: number;
   initialDiskHuman: string;
 }) {
@@ -44,6 +45,8 @@ export default function ProjectWorkspace(props: {
   const [spendRows, setSpendRows] = useState<SpendRow[]>([]);
   const [spendOpen, setSpendOpen] = useState(false);
   const [ratesAreDefaults, setRatesAreDefaults] = useState(false);
+  const [resolution, setResolution] = useState<"480p" | "720p">(props.initialResolution);
+  const [savingRes, setSavingRes] = useState(false);
   const [disk, setDisk] = useState(props.initialDiskHuman);
   const [busy, setBusy] = useState<string | null>(null);
   const [hasLoaded, setHasLoaded] = useState(false);
@@ -86,6 +89,18 @@ export default function ProjectWorkspace(props: {
     });
     await refresh();
     setBusy(null);
+  }
+
+  async function saveResolution(next: "480p" | "720p") {
+    setSavingRes(true);
+    setResolution(next);
+    await fetch(`/api/projects/${projectId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ videoResolution: next }),
+    });
+    await refresh();
+    setSavingRes(false);
   }
 
   async function saveNote(kind: string, sceneId: string | null, note: string) {
@@ -415,6 +430,29 @@ export default function ProjectWorkspace(props: {
             <p className="mb-2 text-xs text-neutral-500">
               Only approved storyboards are rendered — this gate is what keeps paid renders downstream of the free check.
             </p>
+
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <span className="text-xs font-medium text-neutral-600">Quality</span>
+              <div className="flex gap-1 rounded-md bg-neutral-100 p-0.5 text-xs">
+                {(["480p", "720p"] as const).map((r) => (
+                  <button
+                    key={r}
+                    onClick={() => saveResolution(r)}
+                    disabled={savingRes}
+                    className={`rounded px-2.5 py-1 font-medium transition-all active:scale-95 disabled:opacity-50 ${
+                      resolution === r ? "bg-white shadow-sm" : "text-neutral-500"
+                    }`}
+                  >
+                    {r}
+                  </button>
+                ))}
+              </div>
+              <span className="text-xs text-neutral-400">
+                {resolution === "480p"
+                  ? "cheaper and faster — good while iterating"
+                  : "full quality — use for the final render"}
+              </span>
+            </div>
             <Btn
               onClick={() => startJob("videos")}
               busy={busy === "videos"}

@@ -8,8 +8,26 @@ export const VIDEO_MODEL = process.env.SEEDANCE_MODEL ?? "bytedance/seedance-2.0
 export const WHISPER_MODEL =
   process.env.WHISPER_MODEL ?? "openai/whisper";
 
-// Seedance 2.0 Mini, 720p. Used for the spend ledger and the auto-repair budget guard.
-export const SEEDANCE_USD_PER_SEC = Number(process.env.SEEDANCE_USD_PER_SEC ?? 0.073);
+export type VideoResolution = "480p" | "720p";
+/** From the live model schema: resolution is an enum of exactly these two. */
+export const VIDEO_RESOLUTIONS: VideoResolution[] = ["480p", "720p"];
+
+/**
+ * Per-second cost by resolution, for the spend ledger and the budget guard.
+ *
+ * The 720p figure is the measured one carried over from the proof of concept. The
+ * 480p figure is an ESTIMATE — Replicate does not expose per-resolution pricing
+ * through its API, so this is configurable rather than asserted. Set
+ * SEEDANCE_USD_PER_SEC_480 once you can read the real rate off an invoice.
+ */
+export const SEEDANCE_USD_PER_SEC_BY_RES: Record<VideoResolution, number> = {
+  "720p": Number(process.env.SEEDANCE_USD_PER_SEC ?? 0.073),
+  "480p": Number(process.env.SEEDANCE_USD_PER_SEC_480 ?? 0.033),
+};
+export const SEEDANCE_480_RATE_IS_ESTIMATE = !process.env.SEEDANCE_USD_PER_SEC_480;
+
+/** Kept for callers that do not care about resolution; 720p is the pessimistic rate. */
+export const SEEDANCE_USD_PER_SEC = SEEDANCE_USD_PER_SEC_BY_RES["720p"];
 
 // Confirmed from the live model schema, not guessed:
 //   - reference_images (up to 9) CANNOT be combined with `image` (first frame), so the
@@ -122,8 +140,9 @@ export async function generateVideo(opts: {
   referencePaths: string[];
   durationSeconds: number;
   outPath: string;
+  resolution?: VideoResolution;
   onLog?: (m: string) => void;
-}): Promise<{ predictionId: string; usd: number }> {
+}): Promise<{ predictionId: string; usd: number; resolution: VideoResolution }> {
   if (opts.prompt.length > SEEDANCE_PROMPT_LIMIT) {
     throw new Error(
       `Prompt exceeds Seedance's ${SEEDANCE_PROMPT_LIMIT}-char limit by ${opts.prompt.length - SEEDANCE_PROMPT_LIMIT}`
@@ -139,6 +158,8 @@ export async function generateVideo(opts: {
     );
   }
 
+  const resolution: VideoResolution = opts.resolution ?? "480p";
+
   const reference_images: string[] = [];
   for (const p of opts.referencePaths) reference_images.push(await uploadFile(p, opts.onLog));
 
@@ -148,7 +169,7 @@ export async function generateVideo(opts: {
       prompt: opts.prompt,
       reference_images,
       duration: opts.durationSeconds,
-      resolution: "720p",
+      resolution,
       aspect_ratio: "9:16",
       generate_audio: true,
     },
@@ -160,7 +181,11 @@ export async function generateVideo(opts: {
   await mkdir(path.dirname(opts.outPath), { recursive: true });
   await writeFile(opts.outPath, Buffer.from(await videoRes.arrayBuffer()));
 
-  return { predictionId: final.id, usd: opts.durationSeconds * SEEDANCE_USD_PER_SEC };
+  return {
+    predictionId: final.id,
+    usd: opts.durationSeconds * SEEDANCE_USD_PER_SEC_BY_RES[resolution],
+    resolution,
+  };
 }
 
 /**

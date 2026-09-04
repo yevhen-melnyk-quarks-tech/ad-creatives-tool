@@ -123,6 +123,17 @@ which used to abort the whole batch and leave every later scene ungenerated.
 Each scene row shows a **generating** badge while it is being worked on, so progress
 is visible without scrolling back to the top of a long project.
 
+## Render quality
+
+The video section has a **480p / 720p** selector, stored per project and defaulting
+to **480p**. Measured on a 4-second clip: 480p returns 496x864 in ~109s, 720p takes
+~295s, and 480p bills at well under half the rate. Use 480p while iterating on
+storyboards and voices, then switch to 720p for the render you intend to ship —
+assembly upscales to 1080x1920, so a 480p source will look soft in the final cut.
+
+Changing the selector affects clips generated from then on; existing clips keep the
+resolution they were rendered at, so a project can end up mixing the two.
+
 ## Cost control
 
 Every billable call is written to `costs` — Seedance video, Whisper, image

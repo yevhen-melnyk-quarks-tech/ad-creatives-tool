@@ -114,6 +114,10 @@ function migrate(d: Database.Database) {
   // Counts how many times a job has been picked up, to stop an orphaned job that
   // crashes the process from being requeued forever.
   addColumnIfMissing(d, "jobs", "attempts", "INTEGER NOT NULL DEFAULT 0");
+
+  // Render resolution for this project's clips. Defaults to 480p: it is markedly
+  // cheaper and faster, which matters most while a project is still being iterated on.
+  addColumnIfMissing(d, "projects", "video_resolution", "TEXT NOT NULL DEFAULT '480p'");
 }
 
 /**

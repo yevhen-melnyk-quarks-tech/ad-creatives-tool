@@ -3,7 +3,11 @@ import path from "node:path";
 import { artifact, ensureProjectDirs, safeSceneId } from "../paths";
 import { db, uid, recordCost, projectSpendUsd, getNote } from "../db";
 import { generateImage } from "../models/gemini";
-import { generateVideo, transcribe, uploadForTranscription, SEEDANCE_USD_PER_SEC, SEEDANCE_PROMPT_LIMIT } from "../models/replicate";
+import {
+  generateVideo, transcribe, uploadForTranscription,
+  SEEDANCE_USD_PER_SEC_BY_RES, SEEDANCE_PROMPT_LIMIT, VIDEO_RESOLUTIONS,
+  type VideoResolution,
+} from "../models/replicate";
 import { buildContactSheet, extractFrames, extractAudio, durationOf, exists } from "../media/ffmpeg";
 import { assembleFinal } from "../media/assemble";
 import { checkAssembly } from "../agents/assemblyCheck";
@@ -55,6 +59,15 @@ function upsertArtifact(row: {
  * started from the untouched base prompt, re-discovered the same defect, and burned
  * its attempts re-deriving fixes the previous run had already worked out.
  */
+/** The project's chosen render resolution, defaulting to the cheaper 480p. */
+function projectResolution(projectId: string): VideoResolution {
+  const row = db()
+    .prepare(`SELECT video_resolution FROM projects WHERE id = ?`)
+    .get(projectId) as { video_resolution: string | null } | undefined;
+  const value = row?.video_resolution as VideoResolution | undefined;
+  return value && VIDEO_RESOLUTIONS.includes(value) ? value : "480p";
+}
+
 function previousAdditions(projectId: string, kind: string, sceneId: string | null): string[] {
   const row = db()
     .prepare(`SELECT prompt_additions FROM artifacts WHERE project_id=? AND kind=? AND scene_id IS ?`)
@@ -231,6 +244,7 @@ export async function runSceneVideo(opts: {
   const outPath = artifact.video(opts.projectId, opts.scene.id);
   // Clamped here as well as at ingest, so a scenario stored before the real minimum
   // was known still renders instead of failing every attempt.
+  const resolution = projectResolution(opts.projectId);
   const duration = clampDuration(opts.scene.durationSeconds);
   if (duration !== opts.scene.durationSeconds) {
     opts.log(`  scene is ${opts.scene.durationSeconds}s, outside the model's range — rendering at ${duration}s`);
@@ -239,7 +253,7 @@ export async function runSceneVideo(opts: {
     generateSeedanceVideoPrompt(opts.scene, opts.scenario.characters),
     opts.projectId, "video", opts.scene.id, opts.log, SEEDANCE_PROMPT_LIMIT
   );
-  const costPerAttempt = duration * SEEDANCE_USD_PER_SEC;
+  const costPerAttempt = duration * SEEDANCE_USD_PER_SEC_BY_RES[resolution];
 
   const outcome = await repairLoop<string>({
     stage: "video",
@@ -259,12 +273,13 @@ export async function runSceneVideo(opts: {
         referencePaths: [cardPath, sheetPath],
         durationSeconds: duration,
         outPath,
+        resolution,
         onLog: opts.log,
       });
       recordCost({
         projectId: opts.projectId,
         provider: "replicate",
-        operation: "seedance-video",
+        operation: `seedance-video-${resolution}`,
         sceneId: opts.scene.id,
         usd,
         detail: predictionId,
