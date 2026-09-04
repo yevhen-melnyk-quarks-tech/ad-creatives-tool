@@ -10,6 +10,7 @@ import {
 } from "../models/replicate";
 import { buildContactSheet, extractFrames, extractAudio, durationOf, exists } from "../media/ffmpeg";
 import { assembleFinal } from "../media/assemble";
+import { offloadDeliverables, dropRemoteDeliverables } from "../storage/deliverables";
 import { checkAssembly } from "../agents/assemblyCheck";
 import { critiqueCharacterCard, critiqueStoryboard, critiqueVideoScene } from "../agents/critics";
 import { repairLoop } from "../agents/repair";
@@ -519,6 +520,10 @@ export async function runAssembly(opts: {
       `"${[disclaimer.bold, disclaimer.body].filter(Boolean).join(" ")}"`
   );
 
+  // Any previously stored copies describe the cut that is about to be replaced. Drop
+  // them before the render, so a stale signed URL can never outlive the file it named.
+  await dropRemoteDeliverables(opts.projectId);
+
   const { storyDurationSeconds, totalDurationSeconds, cleanPath } = await assembleFinal({
     clipPaths,
     srtPath: artifact.captions(opts.projectId),
@@ -541,6 +546,19 @@ export async function runAssembly(opts: {
   db()
     .prepare(`INSERT INTO qa_runs (id, project_id, stage, verdict, report_json) VALUES (?, ?, 'assembly', ?, ?)`)
     .run(uid(), opts.projectId, report.verdict, JSON.stringify(report));
+
+  // After the critic, never before: it reads the finished file off the disk.
+  //
+  // A storage failure must not fail an assembly that succeeded. The deliverables are
+  // correct and readable either way; where they are stored is an optimisation, and
+  // reporting a completed render as failed because an upload timed out would be a
+  // worse outcome than a full volume.
+  opts.log("Moving deliverables to object storage...");
+  try {
+    await offloadDeliverables(opts.projectId, opts.log);
+  } catch (e) {
+    opts.log(`  offload failed, deliverables kept on the volume: ${(e as Error).message}`);
+  }
 
   return { report, path: outPath };
 }

@@ -3,6 +3,7 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { projectDir } from "@/lib/paths";
+import { remoteUrl } from "@/lib/storage/deliverables";
 
 export const dynamic = "force-dynamic";
 
@@ -19,16 +20,32 @@ const MIME: Record<string, string> = {
 };
 
 /**
- * Serves an artifact out of the project's directory.
+ * Serves an artifact, from the volume or from object storage.
  *
- * The resolved path is confined to that directory: `name` arrives from the client, so
- * without this check a `../../` would read anything the process can reach, including
- * the SQLite file holding every project.
+ * One URL covers both, which is deliberate: every link, every `<video src>` and every
+ * saved bookmark keeps working after a project's deliverables are moved off the
+ * volume, and nothing in the interface has to ask where a file currently lives. An
+ * offloaded file redirects to a short-lived signed URL — so the bucket stays private,
+ * the bytes never pass through this container, and Range requests (scrubbing a
+ * three-minute video) are answered by storage natively.
+ *
+ * The resolved local path is confined to the project's directory: `name` arrives from
+ * the client, so without this check a `../../` would read anything the process can
+ * reach, including the SQLite file holding every project.
  */
 export async function GET(req: Request, { params }: Ctx) {
   const { id } = await params;
-  const name = new URL(req.url).searchParams.get("name");
+  const url = new URL(req.url);
+  const name = url.searchParams.get("name");
   if (!name) return new Response("name is required", { status: 400 });
+
+  const signed = remoteUrl(id, name, { download: url.searchParams.get("download") === "1" });
+  if (signed) {
+    // no-store matters: the redirect target carries a signature that expires, and a
+    // cached 302 would eventually point every visit at a URL storage has stopped
+    // accepting.
+    return new Response(null, { status: 302, headers: { Location: signed, "Cache-Control": "no-store" } });
+  }
 
   const root = path.resolve(projectDir(id));
   const target = path.resolve(root, name);

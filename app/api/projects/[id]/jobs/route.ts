@@ -8,7 +8,7 @@ type Ctx = { params: Promise<{ id: string }> };
 
 const KINDS: JobKind[] = [
   "character_card", "storyboards", "storyboard_one",
-  "videos", "video_one", "captions", "assemble",
+  "videos", "video_one", "captions", "assemble", "offload",
 ];
 
 export async function GET(req: Request, { params }: Ctx) {

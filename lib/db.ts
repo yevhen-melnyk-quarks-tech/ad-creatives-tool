@@ -99,6 +99,19 @@ function migrate(d: Database.Database) {
       PRIMARY KEY (project_id, kind, scene_id)
     );
 
+    -- Deliverables that have been moved to object storage and deleted locally. The
+    -- row is what tells the file route to redirect instead of reading the volume, so
+    -- it is written only after the upload has been read back and its size checked.
+    CREATE TABLE IF NOT EXISTS remote_objects (
+      project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      name         TEXT NOT NULL,         -- the deliverable's filename, e.g. 'FINAL.mp4'
+      object_key   TEXT NOT NULL,
+      bytes        INTEGER NOT NULL,
+      content_type TEXT NOT NULL,
+      uploaded_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (project_id, name)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_jobs_status    ON jobs(status, created_at);
     CREATE INDEX IF NOT EXISTS idx_qa_project     ON qa_runs(project_id, stage);
     CREATE INDEX IF NOT EXISTS idx_costs_project  ON costs(project_id);

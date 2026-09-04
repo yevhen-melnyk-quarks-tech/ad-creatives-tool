@@ -8,6 +8,7 @@ import { RATES_ARE_DEFAULTS } from "@/lib/models/pricing";
 import { VIDEO_RESOLUTIONS, SEEDANCE_480_RATE_IS_ESTIMATE, type VideoResolution } from "@/lib/models/replicate";
 import { isDescriptorType, DESCRIPTORS } from "@/lib/pipeline/descriptors";
 import { resolveDisclaimer } from "@/lib/pipeline/stages";
+import { deliverableLocations, storageIsConfigured } from "@/lib/storage/deliverables";
 
 export const dynamic = "force-dynamic";
 
@@ -70,6 +71,11 @@ export async function GET(_req: Request, { params }: Ctx) {
     resolution480IsEstimate: SEEDANCE_480_RATE_IS_ESTIMATE,
     diskBytes: bytes,
     diskHuman: humanBytes(bytes),
+    // Where each finished file currently is. The links do not change either way — the
+    // file route redirects — but the interface says so, because "is this still on the
+    // box that could fill up" is a question worth being able to answer at a glance.
+    deliverables: deliverableLocations(id),
+    storageConfigured: storageIsConfigured(),
   });
 }
 

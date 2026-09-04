@@ -22,6 +22,7 @@ type Job = {
   progress_step: number | null; progress_total: number | null; progress_label: string | null;
 };
 type QaRow = { stage: string; scene_id: string | null; verdict: string; report: CriticReport };
+type Deliverable = { name: string; label: string; remote: boolean; bytes: number | null };
 
 const KIND_LABEL: Record<string, string> = {
   character_card: "Character card",
@@ -31,6 +32,7 @@ const KIND_LABEL: Record<string, string> = {
   video_one: "Video",
   captions: "Captions",
   assemble: "Final assembly",
+  offload: "Moving to storage",
 };
 
 const VERDICT_STYLE: Record<string, string> = {
@@ -71,6 +73,8 @@ export default function ProjectWorkspace(props: {
   const [busy, setBusy] = useState<string | null>(null);
   const [hasLoaded, setHasLoaded] = useState(false);
 
+  const [deliverables, setDeliverables] = useState<Deliverable[]>([]);
+  const [storageConfigured, setStorageConfigured] = useState(false);
   const [dismissedJobId, setDismissedJobId] = useState<string | null>(null);
   const [briefOpen, setBriefOpen] = useState(!scenario);
   const [briefText, setBriefText] = useState(props.initialBrief);
@@ -92,6 +96,8 @@ export default function ProjectWorkspace(props: {
     setQa(qaRes.reports ?? []);
     setNotes(detail.notes ?? []);
     setDisclaimer(detail.disclaimer ?? null);
+    setDeliverables(detail.deliverables ?? []);
+    setStorageConfigured(Boolean(detail.storageConfigured));
     setHasLoaded(true);
   }, [projectId]);
 
@@ -221,6 +227,10 @@ export default function ProjectWorkspace(props: {
       return [j.active_scene];
     }
   };
+  /** True once a deliverable has been moved to object storage, which is what makes a
+   * shareable link possible — a file on the volume has no URL anyone outside can use. */
+  const isRemote = (name: string) => deliverables.some((d) => d.name === name && d.remote);
+
   const card = find("character_card");
   const cardApproved = card?.approved === 1;
   const approvedSheets = artifacts.filter((a) => a.kind === "storyboard" && a.approved === 1).length;
@@ -666,13 +676,15 @@ export default function ProjectWorkspace(props: {
                     preload="metadata"
                     className="w-72 rounded border border-line"
                   />
-                  <a
-                    href={`/api/projects/${projectId}/file?name=FINAL.mp4`}
-                    download="FINAL.mp4"
-                    className="mt-2 inline-block rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-ink transition-all active:scale-95"
-                  >
-                    Download FINAL.mp4
-                  </a>
+                  <div className="mt-2 flex items-center gap-3">
+                    <a
+                      href={`/api/projects/${projectId}/file?name=FINAL.mp4&download=1`}
+                      className="inline-block rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-ink transition-all active:scale-95"
+                    >
+                      Download FINAL.mp4
+                    </a>
+                    <ShareLink projectId={projectId} name="FINAL.mp4" enabled={isRemote("FINAL.mp4")} />
+                  </div>
                 </div>
                 <div>
                   <p className="mb-1 text-xs font-medium text-ink-muted">Localization set</p>
@@ -680,25 +692,29 @@ export default function ProjectWorkspace(props: {
                     The same cut with no burned text, plus the timed script — for translated captions or a
                     re-voiced version.
                   </p>
-                  <div className="flex flex-col items-start gap-1 text-xs">
+                  <div className="flex flex-col items-start gap-1.5 text-xs">
                     {[
                       ["MASTER_clean.mp4", "Clean master (no captions, no disclaimer, no CTA)"],
                       ["transcript.srt", "Transcript, per line with timings"],
                       ["transcript.json", "Transcript as JSON, with word timings"],
                       ["captions.srt", "Burned captions, as used in the final cut"],
                     ].map(([file, label]) => (
-                      <a
-                        key={file}
-                        href={`/api/projects/${projectId}/file?name=${encodeURIComponent(file)}`}
-                        className="underline transition-opacity active:opacity-60 hover:text-ink"
-                      >
-                        {label}
-                      </a>
+                      <span key={file} className="flex flex-wrap items-baseline gap-2">
+                        <a
+                          href={`/api/projects/${projectId}/file?name=${encodeURIComponent(file)}&download=1`}
+                          className="underline transition-opacity active:opacity-60 hover:text-ink"
+                        >
+                          {label}
+                        </a>
+                        <ShareLink projectId={projectId} name={file} enabled={isRemote(file)} />
+                      </span>
                     ))}
                   </div>
                 </div>
               </div>
             ) : null}
+
+            {(find("final") || props.status === "complete") && <StorageRow deliverables={deliverables} storageConfigured={storageConfigured} onOffload={() => startJob("offload")} busy={busy === "offload"} />}
           </Step>
         </div>
       )}
@@ -864,6 +880,96 @@ function FailedBanner({ job, onRetry, onDismiss }: { job: Job; onRetry: () => vo
         </details>
       )}
     </div>
+  );
+}
+
+/**
+ * Copies a shareable link for one deliverable.
+ *
+ * The URL is minted on demand rather than rendered into the page: it is signed and
+ * expires, so baking one into every page load would put a week-long credential in the
+ * markup of a page nobody asked to share from.
+ */
+function ShareLink({ projectId, name, enabled }: { projectId: string; name: string; enabled: boolean }) {
+  const [state, setState] = useState<"idle" | "working" | "copied" | "failed">("idle");
+  if (!enabled) return null;
+
+  async function copy() {
+    setState("working");
+    try {
+      const res = await fetch(`/api/projects/${projectId}/share?name=${encodeURIComponent(name)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "failed");
+      await navigator.clipboard.writeText(data.url);
+      setState("copied");
+      setTimeout(() => setState("idle"), 2500);
+    } catch {
+      setState("failed");
+      setTimeout(() => setState("idle"), 2500);
+    }
+  }
+
+  return (
+    <button
+      onClick={copy}
+      title="Copy a link that works for 7 days, for someone without access to this tool"
+      className="text-xs text-ink-subtle underline transition-opacity active:opacity-60 hover:text-ink"
+    >
+      {state === "working" ? "…" : state === "copied" ? "link copied ✓" : state === "failed" ? "copy failed" : "copy link"}
+    </button>
+  );
+}
+
+/**
+ * Says where the finished files are, and offers to move them.
+ *
+ * Worth surfacing because the two locations fail differently: the volume is finite and
+ * shared with the space the next render needs, while object storage is not. The links
+ * themselves are identical either way — the file route redirects — so this is
+ * information, not a second set of controls.
+ */
+function StorageRow({
+  deliverables,
+  storageConfigured,
+  onOffload,
+  busy,
+}: {
+  deliverables: Deliverable[];
+  storageConfigured: boolean;
+  onOffload: () => void;
+  busy: boolean;
+}) {
+  const present = deliverables.filter((d) => d.remote || d.bytes !== null);
+  const local = deliverables.filter((d) => !d.remote);
+  const remote = deliverables.filter((d) => d.remote);
+  if (!present.length && !remote.length && !storageConfigured) return null;
+
+  const storedBytes = remote.reduce((a, d) => a + (d.bytes ?? 0), 0);
+
+  return (
+    <p className="mt-4 text-xs text-ink-subtle">
+      {remote.length > 0 && (
+        <>
+          {remote.length} file{remote.length === 1 ? "" : "s"} in object storage
+          {storedBytes > 0 && ` (${(storedBytes / 1e6).toFixed(0)} MB off the volume)`}
+          {local.length > 0 && ", "}
+        </>
+      )}
+      {!storageConfigured ? (
+        "Deliverables are kept on the container volume — object storage is not configured."
+      ) : local.length > 0 && remote.length === 0 ? (
+        <>
+          Deliverables are still on the volume.{" "}
+          <button
+            onClick={onOffload}
+            disabled={busy}
+            className="underline transition-opacity active:opacity-60 hover:text-ink disabled:opacity-40"
+          >
+            {busy ? "moving…" : "Move to object storage"}
+          </button>
+        </>
+      ) : null}
+    </p>
   );
 }
 

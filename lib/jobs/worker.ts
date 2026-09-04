@@ -4,6 +4,8 @@ import { setUsageSink } from "../models/usageTracker";
 import { estimateGeminiUsd } from "../models/pricing";
 import { ScenarioSchema, type Scenario } from "../pipeline/types";
 import { runCharacterCard, runStoryboard, runSceneVideo, runCaptions, runAssembly, captionsAreStale } from "../pipeline/stages";
+import { offloadDeliverables } from "../storage/deliverables";
+import { humanBytes } from "../paths";
 
 /**
  * In-process job runner.
@@ -29,7 +31,8 @@ export type JobKind =
   | "videos"
   | "video_one"
   | "captions"
-  | "assemble";
+  | "assemble"
+  | "offload";     // move finished deliverables to object storage
 
 let running = false;
 let timer: NodeJS.Timeout | null = null;
@@ -354,6 +357,17 @@ async function execute(
       for (const f of r.report.findings) log(`  ${f.blocking ? "BLOCKING" : "note"}: ${f.detail}`);
       log(`Assembly ${r.report.verdict}: ${r.report.summary}`);
       setStatus(projectId, r.report.verdict === "PASS" ? "complete" : "needs_review");
+      return;
+    }
+
+    // Moves already-finished deliverables to object storage. Its own job kind rather
+    // than only a step inside assembly, so a project rendered before storage was
+    // configured can be moved without paying to render it again.
+    case "offload": {
+      setProgress(jobId, "uploading", 0, 1);
+      const { moved, bytes } = await offloadDeliverables(projectId, log);
+      setProgress(jobId, "uploading", 1, 1);
+      log(moved ? `Done — ${moved} file(s) moved, ${humanBytes(bytes)} freed.` : "Nothing to move.");
       return;
     }
 
