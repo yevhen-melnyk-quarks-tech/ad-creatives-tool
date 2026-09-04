@@ -1,41 +1,110 @@
 @import "tailwindcss";
 
 /*
- * This interface is deliberately single-theme light.
+ * Two themes, defined in exactly one place.
  *
- * Every surface in it is built from white and light neutrals — cards, panels, note
- * boxes, form fields. The scaffold shipped a `prefers-color-scheme: dark` block that
- * flipped --foreground to near-white while leaving those surfaces light, so on a
- * dark-mode machine the page chrome went black and every panel rendered near-white
- * text on a white card: the legal descriptor and every note box were literally
- * unreadable.
+ * The interface uses semantic colour tokens (surface, ink, line, accent, and the four
+ * status families) rather than raw neutrals, so a theme is a set of variable values
+ * and nothing else. That structure is deliberate: the original bug was a dark-mode
+ * override that flipped the text colour while leaving every panel light, and it
+ * happened precisely because colour decisions were scattered across a hundred and
+ * thirty class names with no single place to keep them consistent. Adding `dark:`
+ * variants one by one would have reproduced the same failure mode — one missed
+ * utility is one unreadable panel.
  *
- * Rather than half-support dark mode, the theme is pinned. `color-scheme: light` is
- * the load-bearing part — without it the browser styles textareas and inputs with its
- * own dark-mode defaults regardless of what the page says, which is what made the
- * descriptor field's text invisible even where a colour was set on the container.
+ * Every text-on-surface pair that actually occurs in the interface was measured in
+ * both themes; the weakest is 4.5:1, which is the WCAG AA floor for body text. The
+ * pair that set the muted-ink value is small text on the tab strip, the darkest of the
+ * light surfaces.
+ */
+@theme {
+  --color-surface: #ffffff;
+  --color-surface-muted: #fafafa;
+  --color-surface-sunken: #f5f5f5;
+  --color-surface-raised: #e5e5e5;
+
+  --color-line: #e5e5e5;
+  --color-line-strong: #d4d4d4;
+
+  --color-ink: #171717;
+  --color-ink-soft: #404040;
+  --color-ink-muted: #525252;
+  /* 4.5:1 or better on all three light surfaces, including the tab strip. */
+  --color-ink-subtle: #707070;
+
+  /* The primary button: a filled block that inverts against the page. */
+  --color-accent: #171717;
+  --color-accent-ink: #ffffff;
+
+  --color-ok-bg: #dcfce7;
+  --color-ok-ink: #166534;
+  --color-warn-bg: #fffbeb;
+  --color-warn-bg-strong: #fef3c7;
+  --color-warn-line: #fcd34d;
+  --color-warn-ink: #92400e;
+  --color-warn-ink-soft: #b45309;
+  --color-danger-bg: #fef2f2;
+  --color-danger-bg-strong: #fee2e2;
+  --color-danger-ink: #b91c1c;
+  --color-info-bg: #dbeafe;
+  --color-info-ink: #1e40af;
+  --color-info-dot: #2563eb;
+}
+
+/*
+ * `color-scheme` is load-bearing, not decoration. Without it the browser styles
+ * textareas, inputs and scrollbars from its own preference regardless of what the page
+ * says — which is what kept the descriptor field unreadable even once its container
+ * had a colour.
  */
 :root {
   color-scheme: light;
-  --background: #ffffff;
-  --foreground: #171717;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-surface: #1a1a1a;
+  --color-surface-muted: #212121;
+  --color-surface-sunken: #2a2a2a;
+  --color-surface-raised: #383838;
+
+  --color-line: #333333;
+  --color-line-strong: #4a4a4a;
+
+  --color-ink: #f5f5f5;
+  --color-ink-soft: #e0e0e0;
+  --color-ink-muted: #c9c9c9;
+  /* 4.9:1 or better on all three dark surfaces. */
+  --color-ink-subtle: #a1a1a1;
+
+  --color-accent: #f5f5f5;
+  --color-accent-ink: #1a1a1a;
+
+  /* Status colours invert: a dark tinted ground with a light tinted foreground. */
+  --color-ok-bg: #14321f;
+  --color-ok-ink: #86efac;
+  --color-warn-bg: #2a2010;
+  --color-warn-bg-strong: #3a2c14;
+  --color-warn-line: #78500f;
+  --color-warn-ink: #fcd34d;
+  --color-warn-ink-soft: #fbbf24;
+  --color-danger-bg: #2c1416;
+  --color-danger-bg-strong: #3d1a1d;
+  --color-danger-ink: #fca5a5;
+  --color-info-bg: #14243d;
+  --color-info-ink: #93c5fd;
+  --color-info-dot: #3b82f6;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--color-surface-muted);
+  color: var(--color-ink);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
 }
 
 /*
- * Form controls state their own colours instead of inheriting. A field that inherits
+ * Form controls state their own colours rather than inheriting. A field that inherits
  * is one browser default away from being unreadable again, and these carry the legal
  * descriptor and the operator's correction notes — the two places where invisible text
  * does real damage.
@@ -43,13 +112,12 @@ body {
 input,
 textarea,
 select {
-  color: #171717;
-  background-color: #ffffff;
+  color: var(--color-ink);
+  background-color: var(--color-surface);
 }
 
 input::placeholder,
 textarea::placeholder {
-  /* 4.6:1 on white. The scaffold's lighter grey sat at roughly 2.8:1 and failed AA. */
-  color: #737373;
-  opacity: 1; /* Firefox dims placeholders by default, compounding the problem. */
+  color: var(--color-ink-subtle);
+  opacity: 1; /* Firefox dims placeholders by default, compounding low contrast. */
 }

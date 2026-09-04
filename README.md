@@ -172,6 +172,28 @@ authored data rather than by searching the prose for the word "phone". A scenari
 no `charactersPresent` keeps the old assumption, which is correct for an ordinary
 face-to-face scene.
 
+## Theming
+
+Light and dark, chosen with the Light / Dark / System control in the header. The
+choice is stored per browser and applied by an inline script before first paint, so
+switching pages does not flash the wrong theme. On System the OS is tracked live.
+
+Colour lives in semantic tokens — `surface`, `ink`, `line`, `accent` and four status
+families — defined once in `app/globals.css`, with the dark theme as a set of variable
+overrides under `[data-theme="dark"]`. No component names a raw colour. That is a
+deliberate response to how the contrast bug happened: the scaffold flipped the text
+colour under `prefers-color-scheme: dark` while every panel stayed light, and the
+reason it went unnoticed is that colour decisions were spread across 130 class names
+with nowhere to keep them consistent. Adding `dark:` variants one at a time would have
+the same failure mode, since one missed utility is one unreadable panel.
+
+Every text-on-surface pair the interface actually renders is measured in both themes;
+the weakest is 4.54:1, above the 4.5:1 WCAG AA floor for body text. `color-scheme` is
+set alongside each theme, which is load-bearing rather than cosmetic — without it the
+browser styles textareas, inputs and scrollbars from its own preference regardless of
+the page, and that is what kept the descriptor field unreadable even once its
+container had a colour.
+
 ## Legal descriptors and versions
 
 The brief carries three descriptors and a VER block selecting one:

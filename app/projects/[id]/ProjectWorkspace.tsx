@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Scenario } from "@/lib/pipeline/types";
 import type { CriticReport } from "@/lib/agents/types";
+import ThemeToggle from "@/app/ThemeToggle";
 
 type Artifact = {
   kind: string; scene_id: string | null; file_path: string; attempt: number; approved: number;
@@ -22,11 +23,11 @@ type Job = {
 type QaRow = { stage: string; scene_id: string | null; verdict: string; report: CriticReport };
 
 const VERDICT_STYLE: Record<string, string> = {
-  PASS: "bg-green-100 text-green-800",
-  REVIEW: "bg-amber-100 text-amber-800",
-  FAIL: "bg-red-100 text-red-800",
-  UNAVAILABLE: "bg-neutral-200 text-neutral-700",
-  ERROR: "bg-neutral-200 text-neutral-700",
+  PASS: "bg-ok-bg text-ok-ink",
+  REVIEW: "bg-warn-bg-strong text-warn-ink",
+  FAIL: "bg-danger-bg-strong text-danger-ink",
+  UNAVAILABLE: "bg-surface-raised text-ink-soft",
+  ERROR: "bg-surface-raised text-ink-soft",
 };
 
 export default function ProjectWorkspace(props: {
@@ -235,12 +236,13 @@ export default function ProjectWorkspace(props: {
     <main className="mx-auto max-w-5xl p-8">
       <header className="mb-6 flex flex-wrap items-baseline justify-between gap-3">
         <div>
-          <a href="/" className="text-xs text-neutral-500 transition-opacity active:opacity-60 hover:underline">
+          <a href="/" className="text-xs text-ink-subtle transition-opacity active:opacity-60 hover:underline">
             ← All projects
           </a>
           <h1 className="text-2xl font-semibold">{props.title}</h1>
         </div>
-        <div className="flex gap-4 text-xs text-neutral-500">
+        <div className="flex flex-wrap items-center gap-4 text-xs text-ink-subtle">
+          <ThemeToggle />
           <span>status: {props.status}</span>
           <span className="relative">
             <button
@@ -251,25 +253,25 @@ export default function ProjectWorkspace(props: {
               spend: ${spend.toFixed(2)}
             </button>
             {spendOpen && (
-              <div className="absolute right-0 top-6 z-10 w-80 rounded-lg border border-neutral-300 bg-white p-3 text-left shadow-lg">
+              <div className="absolute right-0 top-6 z-10 w-80 rounded-lg border border-line-strong bg-surface p-3 text-left shadow-lg">
                 <table className="w-full text-xs">
                   <tbody>
                     {spendRows.length === 0 && (
                       <tr>
-                        <td className="py-1 text-neutral-500">Nothing spent yet.</td>
+                        <td className="py-1 text-ink-subtle">Nothing spent yet.</td>
                       </tr>
                     )}
                     {spendRows.map((r) => (
                       <tr key={`${r.provider}:${r.operation}`}>
                         <td className="py-0.5 pr-2">{r.operation}</td>
-                        <td className="py-0.5 pr-2 text-neutral-500">x{r.calls}</td>
+                        <td className="py-0.5 pr-2 text-ink-subtle">x{r.calls}</td>
                         <td className="py-0.5 text-right tabular-nums">${r.usd.toFixed(3)}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
                 {ratesAreDefaults && (
-                  <p className="mt-2 border-t border-neutral-200 pt-2 text-xs text-amber-700">
+                  <p className="mt-2 border-t border-line pt-2 text-xs text-warn-ink-soft">
                     Gemini image and agent costs are <strong>estimates</strong> at built-in default rates. Token
                     counts are real; set GEMINI_IMAGE_USD, GEMINI_INPUT_USD_PER_M and GEMINI_OUTPUT_USD_PER_M to
                     your account&apos;s actual prices for exact figures.
@@ -295,15 +297,15 @@ export default function ProjectWorkspace(props: {
       </header>
 
       {props.scenarioError && (
-        <p className="mb-4 rounded-md bg-red-50 p-3 text-sm text-red-700">{props.scenarioError}</p>
+        <p className="mb-4 rounded-md bg-danger-bg p-3 text-sm text-danger-ink">{props.scenarioError}</p>
       )}
-      <section className="mb-6 rounded-lg border border-neutral-200 p-4">
+      <section className="mb-6 rounded-lg border border-line p-4">
         <button
           onClick={() => setBriefOpen((v) => !v)}
           className="flex w-full items-center justify-between text-left text-sm font-medium transition-opacity active:opacity-60"
         >
           <span>Brief {scenario ? "(edit and re-parse)" : "— paste one to begin"}</span>
-          <span className="text-xs text-neutral-500">{briefOpen ? "hide" : "show"}</span>
+          <span className="text-xs text-ink-subtle">{briefOpen ? "hide" : "show"}</span>
         </button>
         {briefOpen && (
           <div className="mt-3">
@@ -312,17 +314,17 @@ export default function ProjectWorkspace(props: {
               onChange={(e) => setBriefText(e.target.value)}
               placeholder="Paste a creative brief — any language, any shape. An agent splits it into characters and scenes."
               rows={8}
-              className="w-full rounded-md border border-neutral-300 px-3 py-2 font-mono text-xs outline-none focus:border-neutral-900"
+              className="w-full rounded-md border border-line-strong px-3 py-2 font-mono text-xs outline-none focus:border-accent"
             />
             {scenario && (
-              <p className="mt-1 text-xs text-amber-700">
+              <p className="mt-1 text-xs text-warn-ink-soft">
                 Re-parsing replaces the current scenario and clears all approvals — regenerated storyboards and videos
                 will need re-approving.
               </p>
             )}
-            {reparseError && <p className="mt-2 rounded-md bg-red-50 p-2 text-xs text-red-700">{reparseError}</p>}
+            {reparseError && <p className="mt-2 rounded-md bg-danger-bg p-2 text-xs text-danger-ink">{reparseError}</p>}
             {reparseWarnings && (
-              <ul className="mt-2 space-y-0.5 rounded-md bg-amber-50 p-2 text-xs text-amber-800">
+              <ul className="mt-2 space-y-0.5 rounded-md bg-warn-bg p-2 text-xs text-warn-ink">
                 {reparseWarnings.map((w, i) => (
                   <li key={i}>• {w}</li>
                 ))}
@@ -336,15 +338,15 @@ export default function ProjectWorkspace(props: {
       </section>
 
       {activeJob && (
-        <div className="mb-6 rounded-lg border border-neutral-300 bg-neutral-50 p-4">
+        <div className="mb-6 rounded-lg border border-line-strong bg-surface-muted p-4">
           <div className="flex items-center justify-between text-sm">
             <span className="font-medium">
               {activeJob.kind} — {activeJob.status}
             </span>
-            <span className="h-2 w-2 animate-pulse rounded-full bg-neutral-900" />
+            <span className="h-2 w-2 animate-pulse rounded-full bg-accent" />
           </div>
           {activeJob.progress && (
-            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap text-xs text-neutral-600">
+            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap text-xs text-ink-muted">
               {activeJob.progress}
             </pre>
           )}
@@ -358,9 +360,9 @@ export default function ProjectWorkspace(props: {
             <div className="flex flex-wrap items-start gap-4">
               {card ? (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={fileUrl(card.file_path)} alt="Character card" className="w-72 rounded border border-neutral-200" />
+                <img src={fileUrl(card.file_path)} alt="Character card" className="w-72 rounded border border-line" />
               ) : (
-                <div className="h-40 w-72 animate-pulse rounded bg-neutral-100" />
+                <div className="h-40 w-72 animate-pulse rounded bg-surface-sunken" />
               )}
               <div className="flex-1 space-y-2">
                 <Verdict report={qaFor("character_card")?.report} />
@@ -394,9 +396,9 @@ export default function ProjectWorkspace(props: {
             >
               {sheetsMissing === 0 ? "All generated" : `Generate missing (${sheetsMissing})`}
             </Btn>
-            {!cardApproved && <span className="ml-3 text-xs text-neutral-500">Approve the character card first.</span>}
+            {!cardApproved && <span className="ml-3 text-xs text-ink-subtle">Approve the character card first.</span>}
             {cardApproved && (
-              <p className="mt-2 text-xs text-neutral-500">
+              <p className="mt-2 text-xs text-ink-subtle">
                 Existing sheets are kept — this only generates scenes that have none. Use a scene&apos;s own Re-roll to
                 replace one.
               </p>
@@ -407,20 +409,20 @@ export default function ProjectWorkspace(props: {
                 const sheet = find("storyboard", scene.id);
                 const report = qaFor("storyboard", scene.id)?.report;
                 return (
-                  <div key={scene.id} className="flex flex-wrap items-start gap-4 rounded border border-neutral-200 p-3">
+                  <div key={scene.id} className="flex flex-wrap items-start gap-4 rounded border border-line p-3">
                     {sheet ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={fileUrl(sheet.file_path)} alt={`Scene ${scene.id}`} className="w-56 rounded border border-neutral-200" />
+                      <img src={fileUrl(sheet.file_path)} alt={`Scene ${scene.id}`} className="w-56 rounded border border-line" />
                     ) : (
-                      <div className="h-24 w-56 animate-pulse rounded bg-neutral-100" />
+                      <div className="h-24 w-56 animate-pulse rounded bg-surface-sunken" />
                     )}
                     <div className="flex-1 space-y-2">
                       <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
                         <span>
                           Scene {scene.id} — {scene.title}
-                          <span className="ml-2 text-xs font-normal text-neutral-500">{scene.durationSeconds}s</span>
+                          <span className="ml-2 text-xs font-normal text-ink-subtle">{scene.durationSeconds}s</span>
                           {sheet && sheet.attempt > 1 && (
-                            <span className="ml-2 text-xs font-normal text-neutral-500">attempt {sheet.attempt}</span>
+                            <span className="ml-2 text-xs font-normal text-ink-subtle">attempt {sheet.attempt}</span>
                           )}
                         </span>
                         <JobBadge state={sceneJobState(scene.id, ["storyboards", "storyboard_one"])} />
@@ -465,27 +467,27 @@ export default function ProjectWorkspace(props: {
 
           {/* Step 3 — videos */}
           <Step n={3} title="Videos">
-            <p className="mb-2 text-xs text-neutral-500">
+            <p className="mb-2 text-xs text-ink-subtle">
               Only approved storyboards are rendered — this gate is what keeps paid renders downstream of the free check.
             </p>
 
             <div className="mb-3 flex flex-wrap items-center gap-2">
-              <span className="text-xs font-medium text-neutral-600">Quality</span>
-              <div className="flex gap-1 rounded-md bg-neutral-100 p-0.5 text-xs">
+              <span className="text-xs font-medium text-ink-muted">Quality</span>
+              <div className="flex gap-1 rounded-md bg-surface-sunken p-0.5 text-xs">
                 {(["480p", "720p"] as const).map((r) => (
                   <button
                     key={r}
                     onClick={() => saveResolution(r)}
                     disabled={savingRes}
                     className={`rounded px-2.5 py-1 font-medium transition-all active:scale-95 disabled:opacity-50 ${
-                      resolution === r ? "bg-white shadow-sm" : "text-neutral-500"
+                      resolution === r ? "bg-surface shadow-sm" : "text-ink-subtle"
                     }`}
                   >
                     {r}
                   </button>
                 ))}
               </div>
-              <span className="text-xs text-neutral-500">
+              <span className="text-xs text-ink-subtle">
                 {resolution === "480p"
                   ? "cheaper and faster — good while iterating"
                   : "full quality — use for the final render"}
@@ -509,18 +511,18 @@ export default function ProjectWorkspace(props: {
                 const report = qaFor("video_scene", scene.id)?.report;
                 const sheetApproved = find("storyboard", scene.id)?.approved === 1;
                 return (
-                  <div key={scene.id} className="rounded border border-neutral-200 p-3">
+                  <div key={scene.id} className="rounded border border-line p-3">
                     <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
                       <span>
                         Scene {scene.id}
-                        <span className="ml-2 text-xs font-normal text-neutral-500">{scene.durationSeconds}s</span>
+                        <span className="ml-2 text-xs font-normal text-ink-subtle">{scene.durationSeconds}s</span>
                       </span>
                       <JobBadge state={sceneJobState(scene.id, ["videos", "video_one"])} />
                     </p>
                     {clip ? (
                       <video src={fileUrl(clip.file_path)} controls className="mt-2 w-full rounded" />
                     ) : (
-                      <div className="mt-2 aspect-[9/16] max-h-48 w-full animate-pulse rounded bg-neutral-100" />
+                      <div className="mt-2 aspect-[9/16] max-h-48 w-full animate-pulse rounded bg-surface-sunken" />
                     )}
                     <div className="mt-2 space-y-2">
                       <Verdict report={report} />
@@ -546,7 +548,7 @@ export default function ProjectWorkspace(props: {
                         />
                       )}
                       {!sheetApproved && (
-                        <p className="text-xs text-neutral-500">Approve this storyboard first.</p>
+                        <p className="text-xs text-ink-subtle">Approve this storyboard first.</p>
                       )}
                     </div>
                   </div>
@@ -558,11 +560,11 @@ export default function ProjectWorkspace(props: {
           {/* Step 4 — captions + assembly */}
           <Step n={4} title="Captions & final assembly">
             {disclaimer && (
-              <div className="mb-4 rounded border border-neutral-200 bg-neutral-50 p-3">
-                <p className="text-xs font-medium text-neutral-700">
+              <div className="mb-4 rounded border border-line bg-surface-muted p-3">
+                <p className="text-xs font-medium text-ink-soft">
                   Legal descriptor burned into the final cut
                 </p>
-                <p className="mt-0.5 text-xs text-neutral-500">
+                <p className="mt-0.5 text-xs text-ink-subtle">
                   Type {disclaimer.type} — {disclaimer.source}
                   {disclaimer.versions.length > 0 && (
                     <>
@@ -582,7 +584,7 @@ export default function ProjectWorkspace(props: {
                       disabled={savingDisc}
                       onClick={() => saveDisclaimer({ descriptorType: o.type, disclaimerText: null })}
                       className={`rounded px-2 py-0.5 text-xs font-medium transition-all active:scale-95 disabled:opacity-50 ${
-                        disclaimer.type === o.type ? "bg-neutral-900 text-white" : "bg-white text-neutral-600 border border-neutral-300"
+                        disclaimer.type === o.type ? "bg-accent text-accent-ink" : "bg-surface text-ink-muted border border-line-strong"
                       }`}
                     >
                       Type {o.type}
@@ -592,7 +594,7 @@ export default function ProjectWorkspace(props: {
                     <button
                       disabled={savingDisc}
                       onClick={() => saveDisclaimer({ descriptorType: null, disclaimerText: null })}
-                      className="ml-1 text-xs text-neutral-500 underline transition-opacity active:opacity-60 disabled:opacity-50"
+                      className="ml-1 text-xs text-ink-subtle underline transition-opacity active:opacity-60 disabled:opacity-50"
                       title="Use whichever type the brief's version block selected"
                     >
                       use the brief&apos;s
@@ -604,9 +606,9 @@ export default function ProjectWorkspace(props: {
                   value={discDraft ?? disclaimer.text}
                   onChange={(e) => setDiscDraft(e.target.value)}
                   rows={2}
-                  className="mt-2 w-full rounded border border-neutral-300 px-2 py-1 text-xs outline-none focus:border-neutral-900"
+                  className="mt-2 w-full rounded border border-line-strong px-2 py-1 text-xs outline-none focus:border-accent"
                 />
-                <p className="mt-1 text-xs text-neutral-500">
+                <p className="mt-1 text-xs text-ink-subtle">
                   Exactly what gets burned. Edit it if the wording needs to differ; &quot;AI-generated.&quot; is set on
                   its own bolder line, as in the reference ad.
                 </p>
@@ -617,7 +619,7 @@ export default function ProjectWorkspace(props: {
                     </Btn>
                     <button
                       onClick={() => setDiscDraft(null)}
-                      className="text-xs text-neutral-500 underline transition-opacity active:opacity-60"
+                      className="text-xs text-ink-subtle underline transition-opacity active:opacity-60"
                     >
                       cancel
                     </button>
@@ -640,16 +642,16 @@ export default function ProjectWorkspace(props: {
             {find("final") || props.status === "complete" ? (
               <div className="mt-4 flex flex-wrap gap-6">
                 <div>
-                  <p className="mb-1 text-xs font-medium text-neutral-600">Final cut</p>
+                  <p className="mb-1 text-xs font-medium text-ink-muted">Final cut</p>
                   <video
                     src={`/api/projects/${projectId}/file?name=FINAL.mp4`}
                     controls
-                    className="w-72 rounded border border-neutral-200"
+                    className="w-72 rounded border border-line"
                   />
                 </div>
                 <div>
-                  <p className="mb-1 text-xs font-medium text-neutral-600">Localization set</p>
-                  <p className="mb-2 max-w-xs text-xs text-neutral-500">
+                  <p className="mb-1 text-xs font-medium text-ink-muted">Localization set</p>
+                  <p className="mb-2 max-w-xs text-xs text-ink-subtle">
                     The same cut with no burned text, plus the timed script — for translated captions or a
                     re-voiced version.
                   </p>
@@ -663,7 +665,7 @@ export default function ProjectWorkspace(props: {
                       <a
                         key={file}
                         href={`/api/projects/${projectId}/file?name=${encodeURIComponent(file)}`}
-                        className="underline transition-opacity active:opacity-60 hover:text-neutral-900"
+                        className="underline transition-opacity active:opacity-60 hover:text-ink"
                       >
                         {label}
                       </a>
@@ -714,7 +716,7 @@ function NoteBox({
     return (
       <button
         onClick={() => setOpen(true)}
-        className="text-xs text-neutral-500 underline transition-opacity active:opacity-60"
+        className="text-xs text-ink-subtle underline transition-opacity active:opacity-60"
       >
         + add a note for the next attempt
       </button>
@@ -722,13 +724,13 @@ function NoteBox({
   }
 
   return (
-    <div className="rounded border border-neutral-200 bg-neutral-50 p-2">
+    <div className="rounded border border-line bg-surface-muted p-2">
       <textarea
         value={text}
         onChange={(e) => setText(e.target.value)}
         rows={3}
         placeholder={"What should change? e.g. \"Mia's hair should be a ponytail, not loose\" or \"remove the logo from the tablets\""}
-        className="w-full rounded border border-neutral-300 px-2 py-1 text-xs outline-none focus:border-neutral-900"
+        className="w-full rounded border border-line-strong px-2 py-1 text-xs outline-none focus:border-accent"
       />
       <div className="mt-1 flex items-center gap-2">
         <Btn small onClick={() => onRun(text)} busy={busy} disabled={disabled || !text.trim()}>
@@ -737,13 +739,13 @@ function NoteBox({
         {initial && (
           <button
             onClick={() => { setText(""); onClear(); }}
-            className="text-xs text-neutral-500 underline transition-opacity active:opacity-60"
+            className="text-xs text-ink-subtle underline transition-opacity active:opacity-60"
             title="Forget this note so it is not reapplied"
           >
             clear
           </button>
         )}
-        <span className="text-xs text-neutral-500">
+        <span className="text-xs text-ink-subtle">
           {initial ? "a note is saved and will be reapplied" : "applied on the next attempt"}
         </span>
       </div>
@@ -758,10 +760,10 @@ function JobBadge({ state }: { state: "generating" | "queued" | null }) {
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${
-        generating ? "bg-blue-100 text-blue-800" : "bg-neutral-200 text-neutral-600"
+        generating ? "bg-info-bg text-info-ink" : "bg-surface-raised text-ink-muted"
       }`}
     >
-      <span className={`h-1.5 w-1.5 rounded-full ${generating ? "animate-pulse bg-blue-600" : "bg-neutral-500"}`} />
+      <span className={`h-1.5 w-1.5 rounded-full ${generating ? "animate-pulse bg-info-dot" : "bg-ink-subtle"}`} />
       {state}
     </span>
   );
@@ -769,9 +771,9 @@ function JobBadge({ state }: { state: "generating" | "queued" | null }) {
 
 function Step({ n, title, children }: { n: number; title: string; children: React.ReactNode }) {
   return (
-    <section className="mb-8 rounded-lg border border-neutral-200 p-5">
+    <section className="mb-8 rounded-lg border border-line p-5">
       <h2 className="mb-3 text-sm font-medium">
-        <span className="mr-2 inline-flex h-5 w-5 items-center justify-center rounded-full bg-neutral-900 text-xs text-white">
+        <span className="mr-2 inline-flex h-5 w-5 items-center justify-center rounded-full bg-accent text-xs text-accent-ink">
           {n}
         </span>
         {title}
@@ -782,7 +784,7 @@ function Step({ n, title, children }: { n: number; title: string; children: Reac
 }
 
 function Verdict({ report }: { report?: CriticReport }) {
-  if (!report) return <p className="text-xs text-neutral-500">No QA run yet.</p>;
+  if (!report) return <p className="text-xs text-ink-subtle">No QA run yet.</p>;
   const blocking = report.findings.filter((f) => f.blocking);
   const advisory = report.findings.filter((f) => !f.blocking);
 
@@ -791,20 +793,20 @@ function Verdict({ report }: { report?: CriticReport }) {
       <p className="flex items-center gap-2 text-xs">
         <span className={`rounded px-1.5 py-0.5 font-medium ${VERDICT_STYLE[report.verdict] ?? ""}`}>{report.verdict}</span>
         {report.consensus && (
-          <span className="text-neutral-500">
+          <span className="text-ink-subtle">
             {report.consensus.failVotes}/{report.consensus.samples} passes flagged it
           </span>
         )}
-        <span className="text-neutral-600">{report.summary}</span>
+        <span className="text-ink-muted">{report.summary}</span>
       </p>
       {blocking.map((f, i) => (
-        <p key={`b${i}`} className="text-xs text-red-700">
+        <p key={`b${i}`} className="text-xs text-danger-ink">
           • {f.subject ? `${f.subject}: ` : ""}
           {f.detail}
         </p>
       ))}
       {advisory.length > 0 && (
-        <details className="text-xs text-neutral-500">
+        <details className="text-xs text-ink-subtle">
           <summary className="cursor-pointer">{advisory.length} advisory note(s)</summary>
           {advisory.map((f, i) => (
             <p key={`a${i}`} className="ml-3 mt-1">
@@ -814,7 +816,7 @@ function Verdict({ report }: { report?: CriticReport }) {
         </details>
       )}
       {report.verdict !== "PASS" && (
-        <p className="text-xs text-neutral-500">
+        <p className="text-xs text-ink-subtle">
           {report.verdict === "FAIL"
             ? "Re-roll to retry with these defects fed back into the prompt, or approve anyway if it looks fine to you."
             : report.verdict === "UNAVAILABLE"
@@ -843,10 +845,10 @@ function AppliedFixes({ artifact }: { artifact?: Artifact }) {
   if (!fixes.length) return null;
 
   return (
-    <details className="text-xs text-neutral-500">
+    <details className="text-xs text-ink-subtle">
       <summary className="cursor-pointer">{fixes.length} fix(es) applied by the QA agent</summary>
       {fixes.map((f, i) => (
-        <p key={i} className="ml-3 mt-1 text-neutral-600">
+        <p key={i} className="ml-3 mt-1 text-ink-muted">
           + {f}
         </p>
       ))}
@@ -871,7 +873,7 @@ function Btn({
 }) {
   const base = small ? "px-2.5 py-1 text-xs" : "px-4 py-2 text-sm";
   const look =
-    variant === "muted" ? "bg-neutral-100 text-neutral-700 border border-neutral-300" : "bg-neutral-900 text-white";
+    variant === "muted" ? "bg-surface-sunken text-ink-soft border border-line-strong" : "bg-accent text-accent-ink";
   return (
     <button
       onClick={onClick}

@@ -90,19 +90,19 @@ export default function NewProjectForm() {
 
   if (warnings && pendingId) {
     return (
-      <div className="rounded-lg border border-amber-300 bg-amber-50 p-5">
-        <h2 className="mb-2 text-sm font-medium text-amber-900">Parsed with {warnings.length} note(s)</h2>
-        <ul className="mb-4 space-y-1 text-xs text-amber-800">
+      <div className="rounded-lg border border-warn-line bg-warn-bg p-5">
+        <h2 className="mb-2 text-sm font-medium text-warn-ink">Parsed with {warnings.length} note(s)</h2>
+        <ul className="mb-4 space-y-1 text-xs text-warn-ink">
           {warnings.map((w, i) => (
             <li key={i}>• {w}</li>
           ))}
         </ul>
-        <p className="mb-3 text-xs text-amber-700">
+        <p className="mb-3 text-xs text-warn-ink-soft">
           The scenario was still created — review characters and scenes on the project page.
         </p>
         <button
           onClick={() => router.push(`/projects/${pendingId}`)}
-          className="rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white transition-all active:scale-95"
+          className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-ink transition-all active:scale-95"
         >
           Open project →
         </button>
@@ -111,30 +111,30 @@ export default function NewProjectForm() {
   }
 
   return (
-    <form onSubmit={submit} className="rounded-lg border border-neutral-200 p-5">
-      <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-neutral-500">New project</h2>
+    <form onSubmit={submit} className="rounded-lg border border-line p-5">
+      <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-ink-subtle">New project</h2>
 
       <input
         value={title}
         onChange={(e) => setTitle(e.target.value)}
         placeholder="Project title"
         required
-        className="w-full rounded-md border border-neutral-300 px-3 py-2 text-sm outline-none focus:border-neutral-900"
+        className="w-full rounded-md border border-line-strong px-3 py-2 text-sm outline-none focus:border-accent"
       />
 
       <div className="mt-3 flex items-center justify-between">
-        <div className="flex gap-1 rounded-md bg-neutral-100 p-0.5 text-xs">
+        <div className="flex gap-1 rounded-md bg-surface-sunken p-0.5 text-xs">
           <button
             type="button"
             onClick={() => setMode("brief")}
-            className={`rounded px-2.5 py-1 font-medium transition-all active:scale-95 ${mode === "brief" ? "bg-white shadow-sm" : "text-neutral-500"}`}
+            className={`rounded px-2.5 py-1 font-medium transition-all active:scale-95 ${mode === "brief" ? "bg-surface shadow-sm" : "text-ink-subtle"}`}
           >
             Paste brief
           </button>
           <button
             type="button"
             onClick={() => setMode("json")}
-            className={`rounded px-2.5 py-1 font-medium transition-all active:scale-95 ${mode === "json" ? "bg-white shadow-sm" : "text-neutral-500"}`}
+            className={`rounded px-2.5 py-1 font-medium transition-all active:scale-95 ${mode === "json" ? "bg-surface shadow-sm" : "text-ink-subtle"}`}
           >
             Paste scenario JSON
           </button>
@@ -144,7 +144,7 @@ export default function NewProjectForm() {
             <button
               type="button"
               onClick={() => fileInput.current?.click()}
-              className="text-xs text-neutral-500 underline transition-opacity active:opacity-60"
+              className="text-xs text-ink-subtle underline transition-opacity active:opacity-60"
             >
               or upload a file
             </button>
@@ -158,20 +158,20 @@ export default function NewProjectForm() {
         onChange={(e) => setText(e.target.value)}
         placeholder={mode === "brief" ? BRIEF_PLACEHOLDER : "Scenario JSON (optional — you can paste it later)"}
         rows={mode === "brief" ? 10 : 8}
-        className="mt-2 w-full rounded-md border border-neutral-300 px-3 py-2 text-xs font-mono outline-none focus:border-neutral-900"
+        className="mt-2 w-full rounded-md border border-line-strong px-3 py-2 text-xs font-mono outline-none focus:border-accent"
       />
       {mode === "brief" && (
-        <p className="mt-1 text-xs text-neutral-500">
+        <p className="mt-1 text-xs text-ink-subtle">
           An agent will split this into characters and scenes — leave it empty to author the scenario later.
         </p>
       )}
 
-      {error && <p className="mt-3 rounded-md bg-red-50 p-3 text-xs text-red-700">{error}</p>}
+      {error && <p className="mt-3 rounded-md bg-danger-bg p-3 text-xs text-danger-ink">{error}</p>}
 
       <button
         type="submit"
         disabled={busy || !title.trim()}
-        className="mt-3 rounded-md bg-neutral-900 px-4 py-2 text-sm font-medium text-white transition-all active:scale-95 disabled:opacity-40 disabled:active:scale-100"
+        className="mt-3 rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-ink transition-all active:scale-95 disabled:opacity-40 disabled:active:scale-100"
       >
         {busy ? (mode === "brief" && text.trim() ? "Parsing brief…" : "Creating…") : "Create project"}
       </button>
