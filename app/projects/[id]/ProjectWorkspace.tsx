@@ -255,8 +255,15 @@ export default function ProjectWorkspace(props: {
                       </p>
                       <Verdict report={report} />
                       <div className="flex flex-wrap gap-2">
-                        <Btn small onClick={() => startJob("storyboard_one", scene.id)} busy={busy === `storyboard_one:${scene.id}`}>
-                          Re-roll
+                        {/* Same single-scene job either way — the label just reflects
+                            whether there is already a sheet to replace. */}
+                        <Btn
+                          small
+                          onClick={() => startJob("storyboard_one", scene.id)}
+                          busy={busy === `storyboard_one:${scene.id}`}
+                          disabled={!cardApproved}
+                        >
+                          {sheet ? "Re-roll" : "Generate"}
                         </Btn>
                         {sheet && (
                           <Btn
@@ -288,9 +295,13 @@ export default function ProjectWorkspace(props: {
               {scenario.scenes.map((scene) => {
                 const clip = find("video", scene.id);
                 const report = qaFor("video_scene", scene.id)?.report;
+                const sheetApproved = find("storyboard", scene.id)?.approved === 1;
                 return (
                   <div key={scene.id} className="rounded border border-neutral-200 p-3">
-                    <p className="text-sm font-medium">Scene {scene.id}</p>
+                    <p className="text-sm font-medium">
+                      Scene {scene.id}
+                      <span className="ml-2 text-xs font-normal text-neutral-500">{scene.durationSeconds}s</span>
+                    </p>
                     {clip ? (
                       <video src={fileUrl(clip.file_path)} controls className="mt-2 w-full rounded" />
                     ) : (
@@ -298,9 +309,20 @@ export default function ProjectWorkspace(props: {
                     )}
                     <div className="mt-2 space-y-2">
                       <Verdict report={report} />
-                      <Btn small onClick={() => startJob("video_one", scene.id)} busy={busy === `video_one:${scene.id}`}>
-                        Re-roll
+                      {/* Gated on this scene's own storyboard approval, so a single
+                          paid render cannot bypass the check that "Generate approved
+                          scenes" enforces in bulk. */}
+                      <Btn
+                        small
+                        onClick={() => startJob("video_one", scene.id)}
+                        busy={busy === `video_one:${scene.id}`}
+                        disabled={!sheetApproved}
+                      >
+                        {clip ? "Re-roll" : "Generate"}
                       </Btn>
+                      {!sheetApproved && (
+                        <p className="text-xs text-neutral-400">Approve this storyboard first.</p>
+                      )}
                     </div>
                   </div>
                 );

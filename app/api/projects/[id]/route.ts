@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { db, projectSpendUsd } from "@/lib/db";
 import { projectDir, dirSizeBytes, humanBytes, pruneIntermediates } from "@/lib/paths";
 import { ScenarioSchema } from "@/lib/pipeline/types";
+import { normalizeScenario } from "@/lib/pipeline/normalize";
 import { parseBrief } from "@/lib/agents/briefParser";
 
 export const dynamic = "force-dynamic";
@@ -56,9 +57,11 @@ export async function PATCH(req: Request, { params }: Ctx) {
         { status: 400 }
       );
     }
+    const normalized = normalizeScenario(parsed.data);
+    warnings = normalized.warnings;
     db()
       .prepare(`UPDATE projects SET scenario_json=?, updated_at=datetime('now') WHERE id=?`)
-      .run(JSON.stringify(parsed.data), id);
+      .run(JSON.stringify(normalized.scenario), id);
   } else if (body.brief !== undefined) {
     // Re-parsing overwrites the scenario. This is the "tweak the Notion text and
     // regenerate" flow, so any per-artifact approvals from the old scenario are now

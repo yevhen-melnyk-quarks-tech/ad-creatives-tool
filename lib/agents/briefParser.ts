@@ -1,5 +1,6 @@
 import { generateStructured, TEXT_MODEL } from "../models/gemini";
 import { estimateSceneDuration } from "../pipeline/timing";
+import { normalizeScenario } from "../pipeline/normalize";
 import { ScenarioSchema, type Scenario, type Character, type Frame } from "../pipeline/types";
 
 /**
@@ -118,6 +119,7 @@ function buildPrompt(rawText: string): string {
     "- Preserve every dialogue line VERBATIM in its original language and wording — never translate it, never invent a new line, never drop a line, never merge two lines into one.",
     "- Every OTHER field (title, location, action, label, noDialogueSound) must be written in English regardless of what language the brief's narration is in — these drive image and video generation prompts, which require English. Translate the brief's scene descriptions into English; do not translate the dialogue lines themselves.",
     "- One frame per dialogue line, in order. If a scene opens with descriptive action before any line is spoken, add ONE leading frame for it with no dialogue (dialogueCharacterName and dialogueLine both empty strings), label it something like 'establishing', and use a wide or medium shot.",
+    "- `title` is a SHORT descriptive name for the scene — three or four words, no scene number and no 'Scene N:' prefix (the number is added separately, so including it reads as a duplicate).",
     "- `location` must be a full visual description of the setting, not a one-word label — invent plausible concrete detail (materials, colours, light) if the brief only names the place, since this drives a consistent background across every frame of the scene.",
     "- Vary `shotType` naturally across a scene rather than repeating one shot for every frame; use a suggested vocabulary of: Wide shot, Medium shot, Medium close-up, Close-up, Extreme close-up, Two-shot, Over-the-shoulder. Favour closer shots for emotionally intense lines.",
     "- `charactersInSceneNames` lists every character who speaks OR is clearly present in the scene's action text, using the exact name string from the `characters` list.",
@@ -247,5 +249,8 @@ function hydrate(raw: RawBrief): BriefParseResult {
     );
   }
 
-  return { scenario: parsed.data, warnings };
+  // A brief's scenes are written at story length, not clip length — split them into
+  // generatable units before anything downstream sees them.
+  const normalized = normalizeScenario(parsed.data);
+  return { scenario: normalized.scenario, warnings: [...warnings, ...normalized.warnings] };
 }

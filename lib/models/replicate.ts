@@ -18,6 +18,9 @@ export const SEEDANCE_USD_PER_SEC = Number(process.env.SEEDANCE_USD_PER_SEC ?? 0
 //   - aspect_ratio defaults to 16:9, so vertical ads must set it explicitly.
 export const SEEDANCE_PROMPT_LIMIT = 4000;
 
+/** From the live model schema: `duration` is an integer with maximum 15. */
+export const SEEDANCE_MAX_DURATION = 15;
+
 function apiKey(): string {
   const k = process.env.REPLICATE_API_TOKEN;
   if (!k) throw new Error("REPLICATE_API_TOKEN is not set");
@@ -115,6 +118,15 @@ export async function generateVideo(opts: {
   if (opts.prompt.length > SEEDANCE_PROMPT_LIMIT) {
     throw new Error(
       `Prompt exceeds Seedance's ${SEEDANCE_PROMPT_LIMIT}-char limit by ${opts.prompt.length - SEEDANCE_PROMPT_LIMIT}`
+    );
+  }
+  // The model's schema caps duration at 15s. Checked here as well as at scenario
+  // ingest so an over-long scene can never reach a paid call and fail there — the
+  // error names the fix rather than surfacing a raw provider validation message.
+  if (opts.durationSeconds < 1 || opts.durationSeconds > SEEDANCE_MAX_DURATION) {
+    throw new Error(
+      `Scene duration ${opts.durationSeconds}s is outside the model's 1-${SEEDANCE_MAX_DURATION}s range. ` +
+        `Long scenes must be split into units of at most ${SEEDANCE_MAX_DURATION}s before generation.`
     );
   }
 

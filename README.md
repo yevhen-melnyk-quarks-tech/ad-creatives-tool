@@ -49,6 +49,14 @@ directory per project, deliberately browsable and prunable from the UI.
    (`lib/agents/briefParser.ts`) turns it into the structured scenario. Pasting
    scenario JSON directly is still available as an advanced mode, and the brief can
    be edited and re-parsed later from the project page.
+
+   Scenes are then split into **generatable units of at most 15 seconds**
+   (`lib/pipeline/timing.ts`), because that is the video model's hard `duration`
+   ceiling — a brief's 40-second conversation becomes `3-1`, `3-2`, `3-3`, each with
+   its own storyboard and its own clip, exactly as the manual run did by hand. Splits
+   land on frame boundaries, since a frame is one dialogue line and therefore one
+   shot. A scenario already inside the limit passes through untouched, so
+   hand-authored durations are never overwritten.
 2. **Character card** — generated, QA'd, then **you approve**.
 3. **Storyboards** — one sheet per scene, each QA'd, each **approved individually**.
 4. **Videos** — generated **only for approved storyboards**. This gate is the point:
@@ -64,7 +72,7 @@ is reviewable rather than a black box.
 
 | Stage | Critic | Kind |
 |---|---|---|
-| Brief → scenario | schema validation + name resolution, with warnings surfaced | deterministic |
+| Brief → scenario | schema validation, name resolution, 15s clip-limit splitting | deterministic |
 | Character card | all characters present, distinct, match descriptions, labelled | vision |
 | Storyboard | card fidelity + **cross-panel consistency** | vision, 2 samples |
 | Video scene | same, on a 4-up contact sheet sampled from the clip | vision, 2 samples |
@@ -120,6 +128,10 @@ app/             UI + API routes
   it is worth a real look before approving.
 - There is no scene editor: to change the parsed scenario you edit the brief text and
   re-parse, which replaces the scenario and clears prior approvals.
+- Split points are chosen arithmetically (balanced units on frame boundaries), not for
+  narrative effect. A single dialogue line too long for one clip cannot be split at
+  all — that is reported as a warning rather than silently sped up, since the SOP rule
+  is that dialogue is never shortened automatically.
 - The prompt-edit path the brief describes ("approve or edit with a prompt") is
   currently re-roll-only; per-artifact manual prompt overrides are not wired up.
 - Video generation is 720p from the model and upscaled at assembly; only the overlays

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { db, uid } from "@/lib/db";
 import { ensureProjectDirs } from "@/lib/paths";
 import { ScenarioSchema } from "@/lib/pipeline/types";
+import { normalizeScenario } from "@/lib/pipeline/normalize";
 import { ensureWorker } from "@/lib/jobs/worker";
 import { parseBrief } from "@/lib/agents/briefParser";
 
@@ -39,7 +40,11 @@ export async function POST(req: Request) {
         { status: 400 }
       );
     }
-    scenarioJson = JSON.stringify(parsed.data);
+    // Pasted JSON gets the same clip-length normalisation as a parsed brief — a
+    // hand-authored 40s scene is just as unusable as a parsed one.
+    const normalized = normalizeScenario(parsed.data);
+    scenarioJson = JSON.stringify(normalized.scenario);
+    warnings = normalized.warnings;
   } else if (body.brief?.trim()) {
     try {
       const result = await parseBrief(body.brief);
