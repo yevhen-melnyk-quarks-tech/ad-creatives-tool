@@ -48,8 +48,11 @@ export type AssembleOptions = {
 
 export type AssembleResult = {
   finalPath: string;
-  /** Localization master: same footage and audio, no burned text of any kind. */
-  cleanPath: string;
+  /**
+   * Localization master: same footage and audio, no burned text of any kind. Null when
+   * there was not enough space for it — the final cut still succeeded.
+   */
+  cleanPath: string | null;
   storyDurationSeconds: number;
   totalDurationSeconds: number;
 };
@@ -62,8 +65,8 @@ export type AssembleResult = {
  * **One full-length encode, not three.** An earlier version wrote a concatenated base,
  * re-encoded it once for the localization master, again for captions, and a third time
  * to append the CTA — three passes over the same three and a half minutes, and roughly
- * 520 MB of files for a 130 MB deliverable. Now the story is encoded exactly once; the
- * localization master and the final cut are stream copies.
+ * 520 MB of files for a 162 MB deliverable. Now there is a single encode, straight from
+ * the clips to the final cut, and the localization master is a stream copy.
  *
  * **Clips are not all the same size.** The resolution selector means a project can hold
  * 720x1280 clips alongside 480p ones (which Seedance returns as 496x864). A stream-copy
@@ -92,19 +95,20 @@ export async function assembleFinal(opts: AssembleOptions): Promise<AssembleResu
   await mkdir(workDir, { recursive: true });
 
   // ── 0. Space check ───────────────────────────────────────────────────────────
-  // The captioned story and the final cut are both roughly the size of the source
-  // footage and briefly coexist, and the localization master is one more copy. Failing
-  // here with a number beats dying two minutes into an encode with a truncated file.
+  // Failing here with a number beats dying two minutes into an encode with a
+  // truncated file. Only the final cut is required: the localization master is an
+  // extra copy of the same footage, and a run that can afford the deliverable but not
+  // the extra should hand over the deliverable, not refuse both.
+  //
+  // Ratios are measured, not guessed: 121 MB of clips produced a 162 MB final cut
+  // (1.35x) and a 127 MB master (1.05x).
   const clipBytes = (await Promise.all(clipPaths.map((p) => stat(p).then((s) => s.size)))).reduce((a, b) => a + b, 0);
-  // 2.4x measured, not guessed: 121 MB of clips produced a 162 MB final cut and a
-  // 127 MB localization master, and both are kept. Add the conformed copies of any
-  // odd-sized clips and the peak lands a little under 2.4x.
-  const needBytes = Math.round(clipBytes * 2.4);
+  const needForFinal = Math.round(clipBytes * 1.6); // final cut, plus conformed copies
   const free = await freeBytes(workDir);
-  if (free < needBytes) {
+  if (free < needForFinal) {
     throw new Error(
-      `Not enough disk space to assemble: ${humanBytes(free)} free, about ${humanBytes(needBytes)} needed ` +
-        `for a final cut and a localization master built from ${humanBytes(clipBytes)} of clips. ` +
+      `Not enough disk space to assemble: ${humanBytes(free)} free, about ${humanBytes(needForFinal)} needed ` +
+        `for a final cut built from ${humanBytes(clipBytes)} of clips. ` +
         `Delete other projects, use "Free up space" to drop working files, or grow the volume.`
     );
   }
@@ -313,17 +317,31 @@ export async function assembleFinal(opts: AssembleOptions): Promise<AssembleResu
   const cleanPath = path.join(path.dirname(outPath), "MASTER_clean.mp4");
   await rm(lastFrame, { force: true });
 
-  onLog?.("Writing localization master (no burned text)...");
-  await run(
-    ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", cleanPath],
-    "clean master"
-  );
+  // Skipped rather than attempted when it will not fit. Half a master left on disk is
+  // worse than none: it looks like a deliverable and plays as a broken one.
+  const needForMaster = Math.round(clipBytes * 1.15);
+  const freeNow = await freeBytes(workDir);
+  let cleanWritten = false;
+  if (freeNow < needForMaster) {
+    onLog?.(
+      `  SKIPPED the localization master: ${humanBytes(freeNow)} free, ${humanBytes(needForMaster)} needed. ` +
+        `The final cut is finished and downloadable. Free space or grow the volume, then assemble again.`
+    );
+    await rm(cleanPath, { force: true });
+  } else {
+    onLog?.("Writing localization master (no burned text)...");
+    await run(
+      ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", cleanPath],
+      "clean master"
+    );
+    cleanWritten = true;
+  }
   await rm(workDir, { recursive: true, force: true });
 
   onLog?.(`DONE -> ${outPath} (${total.toFixed(2)}s)`);
   return {
     finalPath: outPath,
-    cleanPath,
+    cleanPath: cleanWritten ? cleanPath : null,
     storyDurationSeconds: storyDuration,
     totalDurationSeconds: total,
   };

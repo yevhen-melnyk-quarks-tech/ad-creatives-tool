@@ -530,7 +530,7 @@ export async function runAssembly(opts: {
     onProgress: opts.onProgress,
   });
 
-  opts.log(`  clean master -> ${path.basename(cleanPath)}`);
+  if (cleanPath) opts.log(`  clean master -> ${path.basename(cleanPath)}`);
 
   const report = await checkAssembly({
     finalPath: outPath,
