@@ -207,6 +207,20 @@ function frameCaptionLine(
   );
 }
 
+/**
+ * Group references the prose uses instead of naming people.
+ *
+ * These cannot be mapped to specific characters — "the kids" means Mia and Liam here
+ * and someone else in the next brief — so when one appears, asserting who is ABSENT
+ * becomes unsafe. Scene 4-1 said "the family exits, the kids run ahead" with a cast of
+ * two, so the lock forbade the very children the action describes.
+ */
+const GROUP_REFERENCE =
+  /\b(the |his |her |their |our )?(family|kids|children|parents|everyone|everybody|the others|group)\b/i;
+
+export const hasGroupReference = (scene: Scene): boolean =>
+  scene.frames.some((f) => GROUP_REFERENCE.test(f.action));
+
 function identityLockBlock(scene: Scene, allCharacters: Character[]): string | null {
   const present = scene.charactersInScene;
   if (!present.length) return null;
@@ -215,7 +229,10 @@ function identityLockBlock(scene: Scene, allCharacters: Character[]): string | n
   return (
     `CHARACTER IDENTITY LOCK — CRITICAL: only ${present.map((c) => c.name).join(" and ")} appear in this scene. ` +
     present.map((c) => `${c.name} is the one described as: ${c.description}.`).join(" ") +
-    (absent.length
+    // The negative clause is omitted when the action leans on a group noun: we cannot
+    // tell who that group covers, and asserting the wrong absence is what produced a
+    // sheet of a woman talking to nobody.
+    (absent.length && !hasGroupReference(scene)
       ? ` ${absent.map((c) => c.name).join(", ")} do NOT appear in this scene at all — do not use their faces, hair, clothing or body types for anyone in any frame.`
       : "") +
     " Every frame must use the correct person for the character named in that frame's caption." +
@@ -285,10 +302,12 @@ function buildSeedancePrompt(scene: Scene, allCharacters: Character[], useCompac
 
   parts.push(
     "",
-    `Only ${scene.charactersInScene.map((c) => c.name).join(" and ")} appear — nobody else enters at any point.` +
-      (absent.length
-        ? ` ${absent.map((c) => c.name).join(", ")} do NOT appear; never use their faces, hair or clothing for anyone.`
-        : ""),
+    (hasGroupReference(scene)
+      ? `${scene.charactersInScene.map((c) => c.name).join(" and ")} appear in this scene. Where the action refers to a group such as "the family" or "the kids", render exactly the people that group implies and nobody else — do not invent additional adults.`
+      : `Only ${scene.charactersInScene.map((c) => c.name).join(" and ")} appear — nobody else enters at any point.` +
+        (absent.length
+          ? ` ${absent.map((c) => c.name).join(", ")} do NOT appear; never use their faces, hair or clothing for anyone.`
+          : "")),
     "",
     "No real brand logos, badges or wordmarks anywhere — all products and vehicles are generic and unbranded.",
     ""

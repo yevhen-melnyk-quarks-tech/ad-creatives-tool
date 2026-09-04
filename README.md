@@ -149,8 +149,12 @@ forbade the protagonist. Four defences now:
    that says "X does not appear" while X acts is impossible to emit
 4. The parser is told to name characters explicitly and never lean on a group noun
 
-Group nouns in a hand-pasted scenario remain a gap: "the family walks" cannot be
-mapped to specific people, so only characters named outright are recovered.
+Group nouns cannot be mapped to specific people — "the kids" means different
+characters in every brief — so when a scene's action leans on one, the lock states who
+IS present and **omits the negative clause entirely**. Asserting the wrong absence is
+what produced a sheet of a woman alone on a pavement asking "John, what happened?",
+because the cast was two and the action said "the family exits, the kids run ahead".
+Scenes with no group reference keep the strict form.
 
 ### A speaker is not automatically the subject
 
