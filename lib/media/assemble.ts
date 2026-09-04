@@ -1,6 +1,6 @@
 import { writeFile, mkdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
-import { run, probe, exists, durationOf, videoInfo, freeBytes } from "./ffmpeg";
+import { run, probe, exists, durationOf, videoInfo, freeBytes, THREADS } from "./ffmpeg";
 import { humanBytes } from "../paths";
 
 // Delivered at 1080x1920, the resolution the reference ad ships at, not the video
@@ -13,10 +13,28 @@ const S = H / 1280; // pixel geometry below was measured off the reference at 72
 const px = (n: number) => Math.round(n * S);
 const CTA_SECONDS = 5;
 
+/**
+ * Encoder-side limits, which is the only place they take effect.
+ *
+ * `-threads` here caps libx264 rather than the decoder. `sliced-threads` keeps the
+ * worker threads on one frame instead of one frame each, and the two lookahead knobs
+ * bound how many 1080x1920 frames x264 holds ahead of the encode — the default 30-deep
+ * lookahead plus a sync buffer is ~180 MB of frames on its own.
+ *
+ * Measured on the captions pass, peak resident memory: 607 MB with a global thread
+ * cap only, 420 MB with the encoder capped, 241 MB with these params. The container
+ * has 1 GB total and Node already holds ~220 MB of it. Wall-clock cost of the last
+ * step is about 6%.
+ */
+const ENCODER_LIMITS = [
+  "-threads", THREADS,
+  "-x264-params", "sliced-threads=1:rc-lookahead=10:sync-lookahead=0",
+];
+
 // One preset for every encode in this file. The two outputs that get stream-copied
 // together at the end must agree on codec parameters, and identical presets is the
 // cheapest way to guarantee that.
-const X264 = ["-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p"];
+const X264 = ["-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p", ...ENCODER_LIMITS];
 // Likewise one audio format: the clips carry the video model's 32 kHz track, the CTA
 // is synthesised silence, and the final concat can only copy if both already match.
 const AAC = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"];
@@ -65,8 +83,9 @@ export type AssembleResult = {
  * **One full-length encode, not three.** An earlier version wrote a concatenated base,
  * re-encoded it once for the localization master, again for captions, and a third time
  * to append the CTA — three passes over the same three and a half minutes, and roughly
- * 520 MB of files for a 162 MB deliverable. Now there is a single encode, straight from
- * the clips to the final cut, and the localization master is a stream copy.
+ * 520 MB of files for a 162 MB deliverable. Now the footage is encoded exactly once, on
+ * the captions pass; the CTA is a five-second encode, and both the join and the
+ * localization master are stream copies.
  *
  * **Clips are not all the same size.** The resolution selector means a project can hold
  * 720x1280 clips alongside 480p ones (which Seedance returns as 496x864). A stream-copy
@@ -100,10 +119,12 @@ export async function assembleFinal(opts: AssembleOptions): Promise<AssembleResu
   // extra copy of the same footage, and a run that can afford the deliverable but not
   // the extra should hand over the deliverable, not refuse both.
   //
-  // Ratios are measured, not guessed: 121 MB of clips produced a 162 MB final cut
-  // (1.35x) and a 127 MB master (1.05x).
+  // Ratios are measured, not guessed: 121 MB of clips produced a 160 MB captioned
+  // story and a 162 MB final cut, which coexist for the length of the join, plus
+  // conformed copies of any odd-sized clips — a 2.9x peak. The master is a further
+  // 1.05x, checked separately once the peak has passed.
   const clipBytes = (await Promise.all(clipPaths.map((p) => stat(p).then((s) => s.size)))).reduce((a, b) => a + b, 0);
-  const needForFinal = Math.round(clipBytes * 1.6); // final cut, plus conformed copies
+  const needForFinal = Math.round(clipBytes * 2.9);
   const free = await freeBytes(workDir);
   if (free < needForFinal) {
     throw new Error(
@@ -232,76 +253,107 @@ export async function assembleFinal(opts: AssembleOptions): Promise<AssembleResu
   const logoX = px(490);
   const chevBaseY = rowY + px(228);
 
-  // ── 4. The single encode ─────────────────────────────────────────────────────
-  // Story and CTA are joined inside one filter graph, so the only file this writes is
-  // the deliverable. Rendering the story to its own file first and stream-copying the
-  // CTA onto it also works and is easier to read, but it puts two full-length files on
-  // disk at once — 322 MB for a 162 MB result, which does not fit the deployed volume.
+  // ── 4. Story, CTA, join ──────────────────────────────────────────────────────
   //
-  // Every time expression below sits UPSTREAM of the concat, so `t` and `T` are
-  // relative to the CTA's own start, which is what the ramps and the bob want.
-  const filter = [
-    `[0:v]scale=${W}:${H}:flags=lanczos,setsar=1${
-      hasCaptions
-        ? `,subtitles='${esc(srtPath)}':fontsdir='${esc(path.dirname(FONT_BOLD))}':force_style='${captionStyle}'`
-        : ""
-    }[sv]`,
-    // The clips carry the video model's 32 kHz track; concat needs one rate throughout.
-    `[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[sa]`,
+  // Three small commands rather than one filter graph that produces the final cut
+  // directly. The single-graph version is tempting — it writes only the deliverable,
+  // so peak disk is one file instead of two — but it cannot be run in a 1 GB
+  // container. Joining with the `concat` FILTER means the CTA branch is generated
+  // while the story is still encoding, and its frames queue up waiting: 120 frames of
+  // 1080x1920, doubled by the `split` feeding the blur, is most of a gigabyte of
+  // buffered video. It reached exactly 1.000 GB on the deployed box and was killed.
+  //
+  // Joining with the concat DEMUXER instead means each stage runs alone, and the join
+  // is a stream copy. It costs one extra full-length file on disk for the length of
+  // the copy, which is the cheaper of the two constraints to satisfy.
 
-    // Progressive blur ramp. boxblur cannot do this alone — it rejects the time
-    // variable `t` outright, accepting only static radii. So blur a copy statically
-    // and cross-dissolve clear -> blurred with `blend`, whose expressions DO support
-    // time (T). Commas inside the expression must be escaped or the parser splits them.
-    `[1:v]fps=24,setsar=1,split=2[clear][toblur]`,
-    `[toblur]boxblur=luma_radius=${px(18)}:luma_power=2[blurred]`,
-    `[clear][blurred]blend=all_expr='A*(1-min(1\\,T/1.1))+B*min(1\\,T/1.1)'[bg]`,
-    `[2:v]scale=${logoSize}:${logoSize}[logo]`,
-    `[bg][logo]overlay=x=${logoX}:y=${rowY}:enable='gte(t,0.35)'[withlogo]`,
-    // Text is right-aligned to the logo via drawtext's text_w so the pair stays
-    // centred as a block regardless of the word used.
-    `[withlogo]drawtext=fontfile='${esc(FONT_BOLD)}':textfile='${esc(ctaTxt)}':fontsize=${px(76)}:fontcolor=white:x=${logoX - px(30)}-text_w:y=${rowY + px(30)}:shadowx=${px(2)}:shadowy=${px(2)}:shadowcolor=black@0.5:enable='gte(t,0.35)'[withtext]`,
-    // Chevrons bob to draw the eye toward the click target. Drawn as a PNG because
-    // text glyphs rendered as literal letter "V"s. overlay's y accepts time
-    // expressions, so a sine on t animates it.
-    `[3:v]scale=${px(240)}:-1[chev]`,
-    `[withtext][chev]overlay=x=(W-w)/2:y='${chevBaseY}+${px(16)}*sin(2*PI*t*1.3)':enable='gte(t,0.7)'[cv]`,
-    `[4:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[ca]`,
+  // Upscale BEFORE the overlays so text rasterises at delivery resolution rather than
+  // being scaled up as a bitmap afterwards.
+  const vf = [
+    `scale=${W}:${H}:flags=lanczos`,
+    "setsar=1",
+    ...(hasCaptions
+      ? [`subtitles='${esc(srtPath)}':fontsdir='${esc(path.dirname(FONT_BOLD))}':force_style='${captionStyle}'`]
+      : []),
+    ...discFilters,
+  ].join(",");
 
-    `[sv][sa][cv][ca]concat=n=2:v=1:a=1[jv][ja]`,
-    // The descriptor is drawn AFTER the join, once, over both halves. The reference ad
-    // drops it on the CTA, but keeping the AI disclosure across the whole ad is the
-    // safer call and costs nothing visually — and one pass means the story's burned
-    // text and the CTA's cannot drift apart.
-    `[jv]${discFilters.join(",")}[vout]`,
-  ].join(";");
-
-  onLog?.("Rendering the final cut (captions, descriptor, CTA) — the long step...");
-  await mkdir(path.dirname(outPath), { recursive: true });
+  // Read straight from the concat list: an intermediate concatenated file would be a
+  // full-length copy on disk for no gain, since every frame gets re-encoded here anyway.
+  const storyPath = path.join(workDir, "02_story.mp4");
+  onLog?.("Burning captions + descriptor (the long step)...");
   await run(
-    [
-      "-y",
-      "-f", "concat", "-safe", "0", "-i", listPath,
-      "-loop", "1", "-t", String(CTA_SECONDS), "-i", lastFrame,
-      "-i", LOGO,
-      "-i", CHEVRONS,
-      "-f", "lavfi", "-t", String(CTA_SECONDS), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
-      "-filter_complex", filter,
-      "-map", "[vout]", "-map", "[ja]",
-      "-r", "24",
-      ...X264, ...AAC,
-      "-movflags", "+faststart",
-      outPath,
-    ],
-    "final render",
+    ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-vf", vf, ...X264, ...AAC, storyPath],
+    "captions",
     {
       // A three-and-a-half minute 1080x1920 encode on two threads is comfortably
       // longer than the old 15-minute ceiling, which would have SIGKILLed it.
       timeoutMs: 60 * 60_000,
-      totalSeconds: storyDuration + CTA_SECONDS,
-      onProgress: (f) => onProgress?.(f, "Rendering final cut"),
+      totalSeconds: storyDuration,
+      onProgress: (f) => onProgress?.(f, "Burning captions"),
     }
   );
+
+  const ctaFilter = [
+    // Progressive blur ramp. boxblur cannot do this alone — it rejects the time
+    // variable `t` outright, accepting only static radii. So blur a copy statically
+    // and cross-dissolve clear -> blurred with `blend`, whose expressions DO support
+    // time (T). Commas inside the expression must be escaped or the parser splits them.
+    `[0:v]split=2[clear][toblur]`,
+    `[toblur]boxblur=luma_radius=${px(18)}:luma_power=2[blurred]`,
+    `[clear][blurred]blend=all_expr='A*(1-min(1\\,T/1.1))+B*min(1\\,T/1.1)'[bg]`,
+    `[1:v]scale=${logoSize}:${logoSize}[logo]`,
+    `[bg][logo]overlay=x=${logoX}:y=${rowY}:enable='gte(t,0.35)'[withlogo]`,
+    // Text is right-aligned to the logo via drawtext's text_w so the pair stays
+    // centred as a block regardless of the word used.
+    `[withlogo]drawtext=fontfile='${esc(FONT_BOLD)}':textfile='${esc(ctaTxt)}':fontsize=${px(76)}:fontcolor=white:x=${logoX - px(30)}-text_w:y=${rowY + px(30)}:shadowx=${px(2)}:shadowy=${px(2)}:shadowcolor=black@0.5:enable='gte(t,0.35)'[withtext]`,
+    // Descriptor redrawn crisply. The reference drops it on the CTA, but keeping the
+    // AI disclosure across the whole ad is the safer call and costs nothing visually.
+    ...discFilters.map((f, i) => {
+      const inLabel = i === 0 ? "withtext" : `withd${i}`;
+      const outLabel = i === discFilters.length - 1 ? "withdisc" : `withd${i + 1}`;
+      return `[${inLabel}]${f}[${outLabel}]`;
+    }),
+    // Chevrons bob to draw the eye toward the click target. Drawn as a PNG because
+    // text glyphs rendered as literal letter "V"s. overlay's y accepts time
+    // expressions, so a sine on t animates it.
+    `[2:v]scale=${px(240)}:-1[chev]`,
+    `[withdisc][chev]overlay=x=(W-w)/2:y='${chevBaseY}+${px(16)}*sin(2*PI*t*1.3)':enable='gte(t,0.7)'[vout]`,
+    `[vout]setsar=1[vsar]`,
+  ].join(";");
+
+  onLog?.("Building the CTA outro...");
+  const ctaPath = path.join(workDir, "03_cta.mp4");
+  await run(
+    [
+      "-y",
+      "-loop", "1", "-t", String(CTA_SECONDS), "-i", lastFrame,
+      "-i", LOGO,
+      "-i", CHEVRONS,
+      "-f", "lavfi", "-t", String(CTA_SECONDS), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+      "-filter_complex", ctaFilter,
+      "-map", "[vsar]", "-map", "3:a",
+      "-r", "24",
+      ...X264, ...AAC,
+      "-shortest", ctaPath,
+    ],
+    "cta"
+  );
+
+  // A stream copy, not a re-encode. Story and CTA came out of the same encoder
+  // settings above and carry the same 48 kHz stereo AAC, so no transcode is needed —
+  // which also spares the story a second generation of x264 loss.
+  onLog?.("Appending the CTA and finalising...");
+  await mkdir(path.dirname(outPath), { recursive: true });
+  const finalList = path.join(workDir, "final_list.txt");
+  await writeFile(finalList, [storyPath, ctaPath].map((f) => `file '${path.resolve(f)}'`).join("\n"));
+  await run(
+    ["-y", "-f", "concat", "-safe", "0", "-i", finalList, "-c", "copy", "-movflags", "+faststart", outPath],
+    "final concat"
+  );
+  // Reclaimed immediately: this is the copy that made peak disk two full-length files,
+  // and nothing downstream reads it.
+  await Promise.all([rm(storyPath, { force: true }), rm(ctaPath, { force: true })]);
 
   const total = parseFloat(await probe(outPath, "format=duration"));
 

@@ -8,18 +8,23 @@ const FFPROBE = process.env.FFPROBE_PATH ?? "ffprobe";
 /**
  * Thread cap for every ffmpeg invocation.
  *
- * ffmpeg sizes its thread pool from the host's core count, which inside a container
+ * ffmpeg sizes its thread pools from the host's core count, which inside a container
  * is the *machine's* count, not the cgroup's allowance. On the deployed box that meant
- * x264 spinning up dozens of threads, each holding its own 1080x1920 frame buffers and
- * lookahead, and the container's memory ceiling arrived within seconds — the process
- * died by signal three seconds into a three-minute encode, which surfaced as the
- * uninformative "exit null".
+ * x264 spinning up threads for every core the machine had, each holding its own
+ * 1080x1920 frame buffers and lookahead, and the container's 1 GB ceiling arrived
+ * within seconds — the process died by signal three seconds into a three-minute
+ * encode, which surfaced as the uninformative "exit null".
  *
  * Two threads is deliberately conservative: a full-length encode is minutes either
  * way, and finishing slowly beats being killed. Raise FFMPEG_THREADS if the container
  * gets more headroom.
+ *
+ * Exported because placement matters and is easy to get wrong: `-threads` before the
+ * first input configures the DECODER. The encoder needs its own, in the output
+ * options — see ENCODER_LIMITS in assemble.ts. Measured on the captions pass:
+ * 607 MB peak with only a global cap, 420 MB once the encoder was capped too.
  */
-const THREADS = process.env.FFMPEG_THREADS ?? "2";
+export const THREADS = process.env.FFMPEG_THREADS ?? "2";
 
 export const exists = (p: string) => access(p).then(() => true).catch(() => false);
 
@@ -56,7 +61,8 @@ export function run(args: string[], label: string, options: RunOptions | number 
   const { timeoutMs = 900_000, totalSeconds, onProgress } =
     typeof options === "number" ? { timeoutMs: options } : options;
 
-  // Global options, so they have to precede the first input.
+  // Global slot, so these precede the first input: the decoder's thread count and the
+  // filter graph's. The ENCODER cap cannot go here — see THREADS above.
   const full = ["-hide_banner", "-nostdin", "-threads", THREADS, "-filter_threads", THREADS, "-filter_complex_threads", THREADS];
   if (onProgress && totalSeconds) full.push("-progress", "pipe:1", "-nostats");
   full.push(...args);
