@@ -123,6 +123,26 @@ which used to abort the whole batch and leave every later scene ungenerated.
 Each scene row shows a **generating** badge while it is being worked on, so progress
 is visible without scrolling back to the top of a long project.
 
+## Localization set
+
+Assembly writes a second cut alongside the final one:
+
+- `MASTER_clean.mp4` — the same footage and audio at 1080x1920 with **no burned text
+  at all**: no captions, no disclaimer, no CTA. The CTA is excluded rather than
+  included-without-text, since without its text it is only a blurred still and is
+  cheaper to re-render per locale from the logo and a translated label.
+- `transcript.srt` — every spoken line with its timing, prefixed by who says it
+- `transcript.json` — the same, plus **word-level** timings, for a text-to-speech pass
+  that needs to fit an utterance into a known window
+
+Both come from the alignment the captions already use, so timings match the cut
+exactly. Line-level rather than the 2-3 word chunks captions use, which is the wrong
+shape to hand a translator or a voice model.
+
+**Known limit for re-voicing:** the video model returns one mixed audio track, with
+dialogue and ambience together. There is no way to strip just the voices, so a
+re-voiced version either layers new speech over the original or loses the ambience.
+
 ## Speed
 
 Bulk runs generate several scenes at once, bounded by `CONCURRENCY_IMAGE` (default 3)

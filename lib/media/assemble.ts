@@ -37,6 +37,8 @@ export type AssembleOptions = {
 
 export type AssembleResult = {
   finalPath: string;
+  /** Localization master: same footage and audio, no burned text of any kind. */
+  cleanPath: string;
   storyDurationSeconds: number;
   totalDurationSeconds: number;
 };
@@ -64,6 +66,26 @@ export async function assembleFinal(opts: AssembleOptions): Promise<AssembleResu
   await run(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", basePath], "concat");
   const baseDuration = await durationOf(basePath);
   onLog?.(`  base: ${baseDuration.toFixed(2)}s`);
+
+  // ── 1b. Clean localization master ───────────────────────────────────────────
+  // The story at delivery resolution with NO burned text: no captions, no
+  // disclaimer, no CTA. Everything this omits is English and has to be redone per
+  // language anyway, so this is the artifact a localized cut is built from.
+  //
+  // The CTA is excluded rather than included-without-text because without its text it
+  // is just a blurred still — it is cheaper to re-render per locale from the logo and
+  // a translated label than to try to patch over the English one.
+  const cleanPath = path.join(path.dirname(outPath), "MASTER_clean.mp4");
+  onLog?.("Rendering clean master (no captions, no disclaimer, no CTA)...");
+  await run(
+    [
+      "-y", "-i", basePath,
+      "-vf", `scale=${W}:${H}:flags=lanczos`,
+      "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
+      "-c:a", "copy", cleanPath,
+    ],
+    "clean master"
+  );
 
   // ── 2. Captions + disclaimer ─────────────────────────────────────────────────
   // Values are ASS script units: SRT-sourced subtitles lay out against PlayResY=288,
@@ -213,5 +235,10 @@ export async function assembleFinal(opts: AssembleOptions): Promise<AssembleResu
 
   const total = parseFloat(await probe(outPath, "format=duration"));
   onLog?.(`DONE -> ${outPath} (${total.toFixed(2)}s)`);
-  return { finalPath: outPath, storyDurationSeconds: baseDuration, totalDurationSeconds: total };
+  return {
+    finalPath: outPath,
+    cleanPath,
+    storyDurationSeconds: baseDuration,
+    totalDurationSeconds: total,
+  };
 }

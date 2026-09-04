@@ -125,24 +125,44 @@ const srtTime = (sec: number) => {
 
 export type SceneTranscript = { sceneId: string; durationSeconds: number; words: WhisperWord[] };
 
+/**
+ * One spoken line, timed against the assembled video.
+ *
+ * Line-level rather than the 3-word chunks captions use, because this is the
+ * localization artifact: a translator works line by line, and a text-to-speech pass
+ * needs the whole utterance with the window it has to fit inside.
+ */
+export type TranscriptLine = {
+  sceneId: string;
+  character: string;
+  text: string;
+  /** Absolute seconds in the assembled story, not relative to the scene. */
+  start: number;
+  end: number;
+  words: { word: string; start: number; end: number }[];
+};
+
 export type CaptionResult = {
   srt: string;
   cueCount: number;
   /** Per-scene alignment coverage. A low ratio means the clip did not say the script. */
   coverage: { sceneId: string; matched: number; total: number; ratio: number }[];
+  transcript: TranscriptLine[];
 };
 
 export function buildCaptions(scenes: Scene[], transcripts: SceneTranscript[]): CaptionResult {
   const byScene = new Map(transcripts.map((t) => [t.sceneId, t]));
   const cues: { start: number; end: number; text: string }[] = [];
   const coverage: CaptionResult["coverage"] = [];
+  const transcript: TranscriptLine[] = [];
   let offset = 0;
 
   for (const scene of scenes) {
     const t = byScene.get(scene.id);
     if (!t) continue;
 
-    const scriptLines = scene.frames.filter((f) => f.dialogue).map((f) => f.dialogue!.line);
+    const spoken = scene.frames.filter((f) => f.dialogue).map((f) => f.dialogue!);
+    const scriptLines = spoken.map((d) => d.line);
     if (scriptLines.length === 0) {
       // No scripted dialogue: emit nothing, so hallucinated ASR text cannot leak in.
       offset += t.durationSeconds;
@@ -163,6 +183,33 @@ export function buildCaptions(scenes: Scene[], transcripts: SceneTranscript[]): 
     for (const c of chunk(scriptWords, times)) {
       cues.push({ start: c.start + offset, end: c.end + offset, text: c.text });
     }
+
+    // Walk the same word timings back into whole lines. The word list is the lines
+    // joined, so each line owns a contiguous slice of it.
+    let cursor = 0;
+    for (const d of spoken) {
+      const count = d.line.split(/\s+/).filter(Boolean).length;
+      const slice = times.slice(cursor, cursor + count);
+      const words = d.line
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((word, k) => ({
+          word,
+          start: (slice[k]?.start ?? 0) + offset,
+          end: (slice[k]?.end ?? 0) + offset,
+        }));
+      cursor += count;
+      if (!words.length) continue;
+      transcript.push({
+        sceneId: scene.id,
+        character: d.character,
+        text: d.line,
+        start: words[0].start,
+        end: Math.max(words[words.length - 1].end, words[0].start + 0.4),
+        words,
+      });
+    }
+
     offset += t.durationSeconds;
   }
 
@@ -175,7 +222,24 @@ export function buildCaptions(scenes: Scene[], transcripts: SceneTranscript[]): 
   }
 
   const srt = cues.map((c, i) => `${i + 1}\n${srtTime(c.start)} --> ${srtTime(c.end)}\n${c.text}\n`).join("\n");
-  return { srt, cueCount: cues.length, coverage };
+  transcript.sort((a, b) => a.start - b.start);
+  return { srt, cueCount: cues.length, coverage, transcript };
+}
+
+/**
+ * The transcript as an SRT of whole lines, each prefixed with who says it.
+ *
+ * Separate from captions.srt on purpose: that one is chunked to 2-3 words to match the
+ * reference ad's on-screen style, which is the wrong shape to hand a translator or a
+ * voice model.
+ */
+export function transcriptSrt(lines: TranscriptLine[]): string {
+  return lines
+    .map(
+      (l, i) =>
+        `${i + 1}\n${srtTime(l.start)} --> ${srtTime(l.end)}\n${l.character}: ${l.text}\n`
+    )
+    .join("\n");
 }
 
 /**

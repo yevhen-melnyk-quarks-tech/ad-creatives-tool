@@ -14,7 +14,7 @@ import { checkAssembly } from "../agents/assemblyCheck";
 import { critiqueCharacterCard, critiqueStoryboard, critiqueVideoScene } from "../agents/critics";
 import { repairLoop } from "../agents/repair";
 import { generateCharacterCardPrompt, generateStoryboardPrompt, generateSeedanceVideoPrompt } from "./prompts";
-import { buildCaptions, coverageFindings, type SceneTranscript } from "./captions";
+import { buildCaptions, coverageFindings, transcriptSrt, type SceneTranscript } from "./captions";
 import { clampDuration } from "./timing";
 import type { Scenario, Scene } from "./types";
 import type { CriticReport } from "../agents/types";
@@ -376,10 +376,30 @@ export async function runCaptions(opts: {
 
   const result = buildCaptions(opts.scenario.scenes, transcripts);
   await writeFile(artifact.captions(opts.projectId), result.srt, "utf-8");
-  opts.log(`  ${result.cueCount} caption cues`);
+
+  // The timed script, written alongside the captions since it comes from the same
+  // alignment. Line-level and machine-readable, so a translation pass or a
+  // text-to-speech pass has both the wording and the window it has to fit.
+  await writeFile(
+    artifact.transcriptJson(opts.projectId),
+    JSON.stringify(
+      {
+        title: opts.scenario.title,
+        storyDurationSeconds: Number(offsetTotal(transcripts).toFixed(2)),
+        lines: result.transcript,
+      },
+      null,
+      2
+    ),
+    "utf-8"
+  );
+  await writeFile(artifact.transcriptSrt(opts.projectId), transcriptSrt(result.transcript), "utf-8");
+  opts.log(`  ${result.cueCount} caption cues, ${result.transcript.length} transcript line(s)`);
 
   return { cueCount: result.cueCount, findings: coverageFindings(result.coverage) };
 }
+
+const offsetTotal = (ts: SceneTranscript[]) => ts.reduce((sum, t) => sum + t.durationSeconds, 0);
 
 export async function runAssembly(opts: {
   projectId: string;
@@ -395,13 +415,15 @@ export async function runAssembly(opts: {
   if (!clipPaths.length) throw new Error("No scene clips available to assemble");
 
   const outPath = artifact.final(opts.projectId);
-  const { storyDurationSeconds, totalDurationSeconds } = await assembleFinal({
+  const { storyDurationSeconds, totalDurationSeconds, cleanPath } = await assembleFinal({
     clipPaths,
     srtPath: artifact.captions(opts.projectId),
     outPath,
     workDir: artifact.work(opts.projectId),
     onLog: opts.log,
   });
+
+  opts.log(`  clean master -> ${path.basename(cleanPath)}`);
 
   const report = await checkAssembly({
     finalPath: outPath,

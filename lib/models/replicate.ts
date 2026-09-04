@@ -5,8 +5,19 @@ import { fetchRetry, readJson } from "./http";
 const BASE = "https://api.replicate.com/v1";
 
 export const VIDEO_MODEL = process.env.SEEDANCE_MODEL ?? "bytedance/seedance-2.0-mini";
-export const WHISPER_MODEL =
-  process.env.WHISPER_MODEL ?? "openai/whisper";
+/**
+ * Transcription model, pinned by version.
+ *
+ * Two reasons it is not `openai/whisper`. That model is community-owned, so
+ * `POST /models/{owner}/{name}/predictions` returns 404 — only models with an
+ * official default version answer there, and a version-pinned `POST /predictions`
+ * is required instead. More importantly its input schema has no word-timestamp
+ * option at all, and the caption aligner needs word-level timings; this one takes
+ * `timestamp: "word"`.
+ */
+export const WHISPER_VERSION =
+  process.env.WHISPER_VERSION ??
+  "3ab86df6c8f54c11309d4d1f930ac292bad43ace52d10c80d87eb258b3c9f79c";
 
 export type VideoResolution = "480p" | "720p";
 /** From the live model schema: resolution is an enum of exactly these two. */
@@ -89,18 +100,23 @@ type Prediction = {
 };
 
 async function runPrediction(opts: {
-  model: string;
+  /** Owner/name, for models that expose a default version. */
+  model?: string;
+  /** Explicit version hash, for community models that do not. */
+  version?: string;
   input: Record<string, unknown>;
   onLog?: (m: string) => void;
   pollSeconds?: number;
   maxPolls?: number;
 }): Promise<Prediction> {
+  if (!opts.model && !opts.version) throw new Error("runPrediction needs a model or a version");
+
   const createRes = await fetchRetry(
-    `${BASE}/models/${opts.model}/predictions`,
+    opts.version ? `${BASE}/predictions` : `${BASE}/models/${opts.model}/predictions`,
     {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey()}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ input: opts.input }),
+      body: JSON.stringify(opts.version ? { version: opts.version, input: opts.input } : { input: opts.input }),
     },
     4,
     "create prediction",
@@ -222,15 +238,27 @@ export async function transcribe(opts: {
   onLog?: (m: string) => void;
 }): Promise<WhisperWord[]> {
   const final = await runPrediction({
-    model: WHISPER_MODEL,
-    input: { audio: opts.audioUrl, word_timestamps: true, model: "small" },
+    version: WHISPER_VERSION,
+    input: { audio: opts.audioUrl, timestamp: "word", batch_size: 24 },
     onLog: opts.onLog,
     pollSeconds: 5,
     maxPolls: 90,
   });
 
-  const out = final.output as { segments?: { words?: WhisperWord[] }[] } | undefined;
-  return (out?.segments ?? []).flatMap((s) => s.words ?? []);
+  // This model returns `chunks: [{ timestamp: [start, end], text }]`. A trailing
+  // chunk can carry a null end when the audio ends mid-word, so that is filled from
+  // the start rather than becoming NaN and poisoning every downstream timing.
+  const out = final.output as
+    | { chunks?: { timestamp?: (number | null)[]; text?: string }[]; text?: string }
+    | undefined;
+
+  return (out?.chunks ?? []).flatMap((c) => {
+    const word = (c.text ?? "").trim();
+    const start = c.timestamp?.[0];
+    if (!word || typeof start !== "number") return [];
+    const end = typeof c.timestamp?.[1] === "number" ? c.timestamp[1] : start + 0.25;
+    return [{ word, start, end }];
+  });
 }
 
 export async function uploadForTranscription(filePath: string, onLog?: (m: string) => void) {

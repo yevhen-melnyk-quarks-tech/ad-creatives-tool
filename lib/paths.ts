@@ -21,6 +21,10 @@ export const artifact = {
     path.join(projectDir(id), `scene_${safeSceneId(sceneId)}_video.mp4`),
   captions: (id: string) => path.join(projectDir(id), "captions.srt"),
   final: (id: string) => path.join(projectDir(id), "FINAL.mp4"),
+  // Localization set: the same cut with no burned text, plus the timed script.
+  cleanMaster: (id: string) => path.join(projectDir(id), "MASTER_clean.mp4"),
+  transcriptJson: (id: string) => path.join(projectDir(id), "transcript.json"),
+  transcriptSrt: (id: string) => path.join(projectDir(id), "transcript.srt"),
   work: (id: string) => path.join(projectDir(id), "_work"),
   diag: (id: string) => path.join(projectDir(id), "_diag"),
   transcripts: (id: string) => path.join(projectDir(id), "_transcripts"),

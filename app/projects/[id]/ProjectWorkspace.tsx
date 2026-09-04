@@ -548,7 +548,39 @@ export default function ProjectWorkspace(props: {
               <Verdict report={qaFor("assembly")?.report} />
             </div>
             {find("final") || props.status === "complete" ? (
-              <video src={`/api/projects/${projectId}/file?name=FINAL.mp4`} controls className="mt-4 w-72 rounded border border-neutral-200" />
+              <div className="mt-4 flex flex-wrap gap-6">
+                <div>
+                  <p className="mb-1 text-xs font-medium text-neutral-600">Final cut</p>
+                  <video
+                    src={`/api/projects/${projectId}/file?name=FINAL.mp4`}
+                    controls
+                    className="w-72 rounded border border-neutral-200"
+                  />
+                </div>
+                <div>
+                  <p className="mb-1 text-xs font-medium text-neutral-600">Localization set</p>
+                  <p className="mb-2 max-w-xs text-xs text-neutral-500">
+                    The same cut with no burned text, plus the timed script — for translated captions or a
+                    re-voiced version.
+                  </p>
+                  <div className="flex flex-col items-start gap-1 text-xs">
+                    {[
+                      ["MASTER_clean.mp4", "Clean master (no captions, no disclaimer, no CTA)"],
+                      ["transcript.srt", "Transcript, per line with timings"],
+                      ["transcript.json", "Transcript as JSON, with word timings"],
+                      ["captions.srt", "Burned captions, as used in the final cut"],
+                    ].map(([file, label]) => (
+                      <a
+                        key={file}
+                        href={`/api/projects/${projectId}/file?name=${encodeURIComponent(file)}`}
+                        className="underline transition-opacity active:opacity-60 hover:text-neutral-900"
+                      >
+                        {label}
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              </div>
             ) : null}
           </Step>
         </div>
