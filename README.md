@@ -44,7 +44,11 @@ directory per project, deliberately browsable and prunable from the UI.
 
 ## The flow
 
-1. **Scenario** — characters + scenes as JSON (`lib/pipeline/types.ts`).
+1. **Brief** — paste the creative brief straight from Notion (any language, any
+   shape) or upload a `.txt`/`.md`/`.csv`. A parsing agent
+   (`lib/agents/briefParser.ts`) turns it into the structured scenario. Pasting
+   scenario JSON directly is still available as an advanced mode, and the brief can
+   be edited and re-parsed later from the project page.
 2. **Character card** — generated, QA'd, then **you approve**.
 3. **Storyboards** — one sheet per scene, each QA'd, each **approved individually**.
 4. **Videos** — generated **only for approved storyboards**. This gate is the point:
@@ -60,6 +64,7 @@ is reviewable rather than a black box.
 
 | Stage | Critic | Kind |
 |---|---|---|
+| Brief → scenario | schema validation + name resolution, with warnings surfaced | deterministic |
 | Character card | all characters present, distinct, match descriptions, labelled | vision |
 | Storyboard | card fidelity + **cross-panel consistency** | vision, 2 samples |
 | Video scene | same, on a 4-up contact sheet sampled from the clip | vision, 2 samples |
@@ -109,8 +114,12 @@ app/             UI + API routes
 
 ## Known gaps
 
-- Scenario authoring is paste-JSON; there is no scene editor or LLM brief-to-scenario
-  step yet.
+- The brief parser invents visual identity (skin tone, hair, build) wherever the brief
+  is silent, which it usually is. That is necessary — a vague description cannot drive
+  an identity lock — but it means the character card is the agent's interpretation, so
+  it is worth a real look before approving.
+- There is no scene editor: to change the parsed scenario you edit the brief text and
+  re-parse, which replaces the scenario and clears prior approvals.
 - The prompt-edit path the brief describes ("approve or edit with a prompt") is
   currently re-roll-only; per-artifact manual prompt overrides are not wired up.
 - Video generation is 720p from the model and upscaled at assembly; only the overlays

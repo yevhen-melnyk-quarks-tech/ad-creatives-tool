@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { db, projectSpendUsd } from "@/lib/db";
 import { projectDir, dirSizeBytes, humanBytes, pruneIntermediates } from "@/lib/paths";
 import { ScenarioSchema } from "@/lib/pipeline/types";
+import { parseBrief } from "@/lib/agents/briefParser";
 
 export const dynamic = "force-dynamic";
 
@@ -37,9 +38,16 @@ export async function GET(_req: Request, { params }: Ctx) {
 
 export async function PATCH(req: Request, { params }: Ctx) {
   const { id } = await params;
-  const body = (await req.json().catch(() => null)) as { scenario?: unknown; title?: string } | null;
+  const body = (await req.json().catch(() => null)) as
+    | { scenario?: unknown; title?: string; brief?: string }
+    | null;
   if (!body) return NextResponse.json({ error: "invalid body" }, { status: 400 });
 
+  let warnings: string[] = [];
+
+  // Explicit scenario JSON wins over a brief re-parse if both are somehow sent —
+  // that path is the deliberate manual override, so it should never be silently
+  // clobbered by a re-parse of stale brief text.
   if (body.scenario !== undefined) {
     const parsed = ScenarioSchema.safeParse(body.scenario);
     if (!parsed.success) {
@@ -51,11 +59,30 @@ export async function PATCH(req: Request, { params }: Ctx) {
     db()
       .prepare(`UPDATE projects SET scenario_json=?, updated_at=datetime('now') WHERE id=?`)
       .run(JSON.stringify(parsed.data), id);
+  } else if (body.brief !== undefined) {
+    // Re-parsing overwrites the scenario. This is the "tweak the Notion text and
+    // regenerate" flow, so any per-artifact approvals from the old scenario are now
+    // meaningless — clear them rather than leave a video generating from a storyboard
+    // whose scene no longer matches the new scenario.
+    if (!body.brief.trim()) {
+      return NextResponse.json({ error: "brief cannot be empty" }, { status: 400 });
+    }
+    try {
+      const result = await parseBrief(body.brief);
+      warnings = result.warnings;
+      db()
+        .prepare(`UPDATE projects SET brief=?, scenario_json=?, updated_at=datetime('now') WHERE id=?`)
+        .run(body.brief, JSON.stringify(result.scenario), id);
+      db().prepare(`DELETE FROM artifacts WHERE project_id=?`).run(id);
+    } catch (err) {
+      return NextResponse.json({ error: `Could not parse brief: ${(err as Error).message}` }, { status: 422 });
+    }
   }
+
   if (body.title) {
     db().prepare(`UPDATE projects SET title=?, updated_at=datetime('now') WHERE id=?`).run(body.title, id);
   }
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, warnings });
 }
 
 /** Reclaims disk without destroying the deliverable: drops working/diagnostic files only. */

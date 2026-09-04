@@ -3,6 +3,7 @@ import { db, uid } from "@/lib/db";
 import { ensureProjectDirs } from "@/lib/paths";
 import { ScenarioSchema } from "@/lib/pipeline/types";
 import { ensureWorker } from "@/lib/jobs/worker";
+import { parseBrief } from "@/lib/agents/briefParser";
 
 // Every route touches SQLite and the artifact volume, so none of this can be
 // statically rendered or cached.
@@ -24,8 +25,12 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "title is required" }, { status: 400 });
   }
 
-  // A scenario may be supplied up-front (pasted JSON) or authored later.
+  // Three ways in, in priority order: explicit scenario JSON (power-user/edit path),
+  // a raw brief to parse (the normal path — paste straight from Notion), or neither
+  // (an empty draft to fill in later).
   let scenarioJson: string | null = null;
+  let warnings: string[] = [];
+
   if (body.scenario) {
     const parsed = ScenarioSchema.safeParse(body.scenario);
     if (!parsed.success) {
@@ -35,6 +40,14 @@ export async function POST(req: Request) {
       );
     }
     scenarioJson = JSON.stringify(parsed.data);
+  } else if (body.brief?.trim()) {
+    try {
+      const result = await parseBrief(body.brief);
+      scenarioJson = JSON.stringify(result.scenario);
+      warnings = result.warnings;
+    } catch (err) {
+      return NextResponse.json({ error: `Could not parse brief: ${(err as Error).message}` }, { status: 422 });
+    }
   }
 
   const id = uid();
@@ -44,5 +57,5 @@ export async function POST(req: Request) {
   await ensureProjectDirs(id);
   ensureWorker();
 
-  return NextResponse.json({ id }, { status: 201 });
+  return NextResponse.json({ id, warnings }, { status: 201 });
 }

@@ -21,6 +21,7 @@ export default function ProjectWorkspace(props: {
   status: string;
   scenario: Scenario | null;
   scenarioError: string | null;
+  initialBrief: string;
   initialSpendUsd: number;
   initialDiskHuman: string;
 }) {
@@ -33,6 +34,12 @@ export default function ProjectWorkspace(props: {
   const [disk, setDisk] = useState(props.initialDiskHuman);
   const [busy, setBusy] = useState<string | null>(null);
   const [hasLoaded, setHasLoaded] = useState(false);
+
+  const [briefOpen, setBriefOpen] = useState(!scenario);
+  const [briefText, setBriefText] = useState(props.initialBrief);
+  const [reparsing, setReparsing] = useState(false);
+  const [reparseError, setReparseError] = useState<string | null>(null);
+  const [reparseWarnings, setReparseWarnings] = useState<string[] | null>(null);
 
   const refresh = useCallback(async () => {
     const [detail, qaRes] = await Promise.all([
@@ -72,6 +79,28 @@ export default function ProjectWorkspace(props: {
       body: JSON.stringify({ kind, sceneId, approved }),
     });
     await refresh();
+  }
+
+  async function reparse() {
+    setReparsing(true);
+    setReparseError(null);
+    setReparseWarnings(null);
+    const res = await fetch(`/api/projects/${projectId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ brief: briefText }),
+    });
+    const data = await res.json();
+    setReparsing(false);
+    if (!res.ok) {
+      setReparseError(data.error ?? "Failed to parse brief");
+      return;
+    }
+    if (data.warnings?.length) setReparseWarnings(data.warnings);
+    // Scenario, artifacts and approvals all changed server-side (re-parsing clears
+    // prior approvals — see the PATCH route) — a client refetch of just jobs/artifacts
+    // would leave the page showing the old scenario prop, so reload for real.
+    window.location.reload();
   }
 
   const fileUrl = (p: string) => `/api/projects/${projectId}/file?name=${encodeURIComponent(p.split("/").pop() ?? "")}`;
@@ -116,11 +145,43 @@ export default function ProjectWorkspace(props: {
       {props.scenarioError && (
         <p className="mb-4 rounded-md bg-red-50 p-3 text-sm text-red-700">{props.scenarioError}</p>
       )}
-      {!scenario && (
-        <p className="mb-4 rounded-md bg-amber-50 p-3 text-sm text-amber-800">
-          No scenario yet. PATCH one to <code>/api/projects/{projectId}</code> to begin.
-        </p>
-      )}
+      <section className="mb-6 rounded-lg border border-neutral-200 p-4">
+        <button
+          onClick={() => setBriefOpen((v) => !v)}
+          className="flex w-full items-center justify-between text-left text-sm font-medium transition-opacity active:opacity-60"
+        >
+          <span>Brief {scenario ? "(edit and re-parse)" : "— paste one to begin"}</span>
+          <span className="text-xs text-neutral-400">{briefOpen ? "hide" : "show"}</span>
+        </button>
+        {briefOpen && (
+          <div className="mt-3">
+            <textarea
+              value={briefText}
+              onChange={(e) => setBriefText(e.target.value)}
+              placeholder="Paste a creative brief — any language, any shape. An agent splits it into characters and scenes."
+              rows={8}
+              className="w-full rounded-md border border-neutral-300 px-3 py-2 font-mono text-xs outline-none focus:border-neutral-900"
+            />
+            {scenario && (
+              <p className="mt-1 text-xs text-amber-700">
+                Re-parsing replaces the current scenario and clears all approvals — regenerated storyboards and videos
+                will need re-approving.
+              </p>
+            )}
+            {reparseError && <p className="mt-2 rounded-md bg-red-50 p-2 text-xs text-red-700">{reparseError}</p>}
+            {reparseWarnings && (
+              <ul className="mt-2 space-y-0.5 rounded-md bg-amber-50 p-2 text-xs text-amber-800">
+                {reparseWarnings.map((w, i) => (
+                  <li key={i}>• {w}</li>
+                ))}
+              </ul>
+            )}
+            <Btn small onClick={reparse} busy={reparsing} disabled={!briefText.trim()}>
+              {scenario ? "Re-parse scenario" : "Parse brief"}
+            </Btn>
+          </div>
+        )}
+      </section>
 
       {activeJob && (
         <div className="mb-6 rounded-lg border border-neutral-300 bg-neutral-50 p-4">
