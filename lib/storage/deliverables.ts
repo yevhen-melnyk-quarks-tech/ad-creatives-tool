@@ -3,7 +3,7 @@ import path from "node:path";
 import { db } from "../db";
 import { projectDir, humanBytes } from "../paths";
 import { exists } from "../media/ffmpeg";
-import { r2Config, putFile, headObject, deleteObject, presignGet, objectKey } from "./r2";
+import { r2Config, putFile, objectSize, deleteObject, presignGet, objectKey } from "./r2";
 
 /**
  * Moving finished deliverables off the container volume.
@@ -87,7 +87,7 @@ export async function offloadDeliverables(projectId: string, log: (m: string) =>
     log(`  uploading ${name} (${humanBytes(localBytes)})...`);
     await putFile(c, key, local, contentType);
 
-    const remoteBytes = await headObject(c, key);
+    const remoteBytes = await objectSize(c, key);
     if (remoteBytes !== localBytes) {
       // Do not record, do not delete. Leaving the local file intact is the point.
       throw new Error(

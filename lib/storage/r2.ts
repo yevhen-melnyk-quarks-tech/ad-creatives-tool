@@ -120,12 +120,28 @@ export async function putFile(c: R2Config, key: string, filePath: string, conten
   return size;
 }
 
-/** Object size in bytes, or null when it does not exist. */
-export async function headObject(c: R2Config, key: string): Promise<number | null> {
-  const res = await send(c, "HEAD", key);
+/**
+ * Object size in bytes, or null when it does not exist.
+ *
+ * A one-byte ranged GET rather than a HEAD. Cloudflare gzips compressible types, and
+ * a HEAD that comes back `content-encoding: gzip` carries no usable content-length —
+ * it reads as 0. That is not a hypothetical: it made every text deliverable look like
+ * a failed upload while the object was in fact stored perfectly, because the size
+ * check compared 0 against the local file. `content-range` reports the object's true
+ * length for every content type.
+ */
+export async function objectSize(c: R2Config, key: string): Promise<number | null> {
+  const res = await send(c, "GET", key, undefined, undefined, { range: "bytes=0-0" });
   if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`R2 head of ${key} failed: ${res.status}`);
-  return Number(res.headers.get("content-length") ?? 0);
+  if (res.status === 416) return 0; // a ranged read of an empty object
+  if (res.status !== 206 && !res.ok) throw new Error(`R2 size of ${key} failed: ${res.status}`);
+
+  const total = /\/(\d+)\s*$/.exec(res.headers.get("content-range") ?? "")?.[1];
+  await res.arrayBuffer(); // one byte, but the body still has to be drained
+  if (total) return Number(total);
+
+  const len = res.headers.get("content-length");
+  return len === null ? null : Number(len);
 }
 
 export async function deleteObject(c: R2Config, key: string) {
