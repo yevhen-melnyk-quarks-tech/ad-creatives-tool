@@ -335,8 +335,22 @@ async function execute(
         log("Captions are up to date.");
       }
 
-      setProgress(jobId, "assembling", 0, 1);
-      const r = await runAssembly({ projectId, scenario, log });
+      // The encode reports its own position in the timeline, so the bar tracks real
+      // output rather than counting steps. Written only when the whole percent moves:
+      // ffmpeg emits progress twice a second, and a DB write per tick is pure noise.
+      setProgress(jobId, "assembling", 0, 100);
+      let lastPct = -1;
+      const r = await runAssembly({
+        projectId,
+        scenario,
+        log,
+        onProgress: (fraction, label) => {
+          const pct = Math.round(fraction * 100);
+          if (pct === lastPct) return;
+          lastPct = pct;
+          setProgress(jobId, label, pct, 100);
+        },
+      });
       for (const f of r.report.findings) log(`  ${f.blocking ? "BLOCKING" : "note"}: ${f.detail}`);
       log(`Assembly ${r.report.verdict}: ${r.report.summary}`);
       setStatus(projectId, r.report.verdict === "PASS" ? "complete" : "needs_review");

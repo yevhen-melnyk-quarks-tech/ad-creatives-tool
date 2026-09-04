@@ -23,6 +23,16 @@ type Job = {
 };
 type QaRow = { stage: string; scene_id: string | null; verdict: string; report: CriticReport };
 
+const KIND_LABEL: Record<string, string> = {
+  character_card: "Character card",
+  storyboards: "Storyboards",
+  storyboard_one: "Storyboard",
+  videos: "Videos",
+  video_one: "Video",
+  captions: "Captions",
+  assemble: "Final assembly",
+};
+
 const VERDICT_STYLE: Record<string, string> = {
   PASS: "bg-ok-bg text-ok-ink",
   REVIEW: "bg-warn-bg-strong text-warn-ink",
@@ -61,6 +71,7 @@ export default function ProjectWorkspace(props: {
   const [busy, setBusy] = useState<string | null>(null);
   const [hasLoaded, setHasLoaded] = useState(false);
 
+  const [dismissedJobId, setDismissedJobId] = useState<string | null>(null);
   const [briefOpen, setBriefOpen] = useState(!scenario);
   const [briefText, setBriefText] = useState(props.initialBrief);
   const [reparsing, setReparsing] = useState(false);
@@ -181,6 +192,12 @@ export default function ProjectWorkspace(props: {
   const runningJob = jobs.find((j) => j.status === "running");
   const queuedJobs = jobs.filter((j) => j.status === "queued");
   const activeJob = runningJob ?? queuedJobs[queuedJobs.length - 1];
+
+  // A job that fails has to say so where the running banner was, or the only signal is
+  // that the banner disappeared — which reads as "finished". jobs is ordered newest
+  // first, so this is the most recent failure, shown until it is dismissed or
+  // superseded by new work.
+  const failedJob = !activeJob && jobs[0]?.status === "failed" && jobs[0].id !== dismissedJobId ? jobs[0] : undefined;
 
   const sceneOfPayload = (j: Job): string | null => {
     try {
@@ -339,6 +356,13 @@ export default function ProjectWorkspace(props: {
       </section>
 
       {activeJob && <RunningBanner job={activeJob} scenes={activeScenesOf(activeJob)} />}
+      {failedJob && (
+        <FailedBanner
+          job={failedJob}
+          onRetry={() => startJob(failedJob.kind, sceneOfPayload(failedJob) ?? undefined)}
+          onDismiss={() => setDismissedJobId(failedJob.id)}
+        />
+      )}
 
       {scenario && (
         <div className={hasLoaded ? "" : "opacity-50 transition-opacity"}>
@@ -638,8 +662,17 @@ export default function ProjectWorkspace(props: {
                   <video
                     src={`/api/projects/${projectId}/file?name=FINAL.mp4`}
                     controls
+                    playsInline
+                    preload="metadata"
                     className="w-72 rounded border border-line"
                   />
+                  <a
+                    href={`/api/projects/${projectId}/file?name=FINAL.mp4`}
+                    download="FINAL.mp4"
+                    className="mt-2 inline-block rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-ink transition-all active:scale-95"
+                  >
+                    Download FINAL.mp4
+                  </a>
                 </div>
                 <div>
                   <p className="mb-1 text-xs font-medium text-ink-muted">Localization set</p>
@@ -761,16 +794,6 @@ function RunningBanner({ job, scenes }: { job: Job; scenes: string[] }) {
   const total = job.progress_total;
   const pct = step !== null && total !== null && total > 0 ? Math.round((step / total) * 100) : null;
 
-  const KIND_LABEL: Record<string, string> = {
-    character_card: "Character card",
-    storyboards: "Storyboards",
-    storyboard_one: "Storyboard",
-    videos: "Videos",
-    video_one: "Video",
-    captions: "Captions",
-    assemble: "Final assembly",
-  };
-
   return (
     <div className="sticky top-0 z-20 -mx-8 mb-6 border-b border-line bg-surface/95 px-8 py-3 backdrop-blur">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
@@ -799,6 +822,47 @@ function RunningBanner({ job, scenes }: { job: Job; scenes: string[] }) {
           {job.progress ?? ""}
         </pre>
       </details>
+    </div>
+  );
+}
+
+/**
+ * Sticky report for a job that failed.
+ *
+ * Its absence was a real defect, not a missing nicety: the only sign a run had died
+ * was the running banner going away, which is indistinguishable from success. Pressing
+ * "Assemble final" and watching the status vanish left nothing on screen to say ffmpeg
+ * had been killed. The error text is shown in full — these messages name the actual
+ * cause (out of memory, out of disk, a timeout) and are what makes the next step
+ * obvious.
+ */
+function FailedBanner({ job, onRetry, onDismiss }: { job: Job; onRetry: () => void; onDismiss: () => void }) {
+  return (
+    <div className="sticky top-0 z-20 -mx-8 mb-6 border-y border-danger-ink/25 bg-danger-bg px-8 py-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="text-sm font-medium text-danger-ink">{KIND_LABEL[job.kind] ?? job.kind} failed</span>
+        <button
+          onClick={onRetry}
+          className="rounded bg-accent px-2.5 py-1 text-xs font-medium text-accent-ink transition-all active:scale-95"
+        >
+          Try again
+        </button>
+        <button
+          onClick={onDismiss}
+          className="text-xs text-danger-ink underline transition-opacity active:opacity-60"
+        >
+          dismiss
+        </button>
+      </div>
+      {job.error && (
+        <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-xs text-danger-ink">{job.error}</pre>
+      )}
+      {job.progress && (
+        <details className="mt-1">
+          <summary className="cursor-pointer text-xs text-danger-ink/80">log up to the failure</summary>
+          <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap text-xs text-ink-muted">{job.progress}</pre>
+        </details>
+      )}
     </div>
   );
 }

@@ -502,6 +502,7 @@ export async function runAssembly(opts: {
   projectId: string;
   scenario: Scenario;
   log: Log;
+  onProgress?: (fraction: number, label: string) => void;
 }): Promise<{ report: CriticReport; path: string }> {
   const clipPaths: string[] = [];
   for (const scene of opts.scenario.scenes) {
@@ -526,6 +527,7 @@ export async function runAssembly(opts: {
     disclaimerBold: disclaimer.bold,
     disclaimerRegular: disclaimer.body,
     onLog: opts.log,
+    onProgress: opts.onProgress,
   });
 
   opts.log(`  clean master -> ${path.basename(cleanPath)}`);

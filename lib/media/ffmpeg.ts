@@ -1,35 +1,124 @@
-import { execFile } from "node:child_process";
-import { mkdir, access } from "node:fs/promises";
+import { spawn, execFile } from "node:child_process";
+import { mkdir, access, statfs } from "node:fs/promises";
 import path from "node:path";
 
 const FFMPEG = process.env.FFMPEG_PATH ?? "ffmpeg";
 const FFPROBE = process.env.FFPROBE_PATH ?? "ffprobe";
 
+/**
+ * Thread cap for every ffmpeg invocation.
+ *
+ * ffmpeg sizes its thread pool from the host's core count, which inside a container
+ * is the *machine's* count, not the cgroup's allowance. On the deployed box that meant
+ * x264 spinning up dozens of threads, each holding its own 1080x1920 frame buffers and
+ * lookahead, and the container's memory ceiling arrived within seconds — the process
+ * died by signal three seconds into a three-minute encode, which surfaced as the
+ * uninformative "exit null".
+ *
+ * Two threads is deliberately conservative: a full-length encode is minutes either
+ * way, and finishing slowly beats being killed. Raise FFMPEG_THREADS if the container
+ * gets more headroom.
+ */
+const THREADS = process.env.FFMPEG_THREADS ?? "2";
+
 export const exists = (p: string) => access(p).then(() => true).catch(() => false);
 
-export function run(args: string[], label: string, timeoutMs = 900_000): Promise<void> {
+/** Free bytes on the filesystem holding `dir` (walking up to the nearest existing parent). */
+export async function freeBytes(dir: string): Promise<number> {
+  let probeDir = path.resolve(dir);
+  for (;;) {
+    try {
+      const s = await statfs(probeDir);
+      return s.bsize * s.bavail;
+    } catch {
+      const parent = path.dirname(probeDir);
+      if (parent === probeDir) return Number.POSITIVE_INFINITY; // cannot tell; do not block
+      probeDir = parent;
+    }
+  }
+}
+
+export type RunOptions = {
+  timeoutMs?: number;
+  /** Output duration in seconds. Supplying it turns on fractional progress reporting. */
+  totalSeconds?: number;
+  onProgress?: (fraction: number) => void;
+};
+
+/**
+ * Runs ffmpeg, resolving on exit 0 and rejecting with a diagnosable message otherwise.
+ *
+ * Uses spawn rather than execFile because execFile buffers all output and kills the
+ * child once maxBuffer is exceeded — a failure mode indistinguishable from the real
+ * ones. Only the stderr tail is retained here, so output volume cannot kill a job.
+ */
+export function run(args: string[], label: string, options: RunOptions | number = {}): Promise<void> {
+  const { timeoutMs = 900_000, totalSeconds, onProgress } =
+    typeof options === "number" ? { timeoutMs: options } : options;
+
+  // Global options, so they have to precede the first input.
+  const full = ["-hide_banner", "-nostdin", "-threads", THREADS, "-filter_threads", THREADS, "-filter_complex_threads", THREADS];
+  if (onProgress && totalSeconds) full.push("-progress", "pipe:1", "-nostats");
+  full.push(...args);
+
   return new Promise((resolve, reject) => {
-    const proc = execFile(FFMPEG, args, { maxBuffer: 40 * 1024 * 1024, timeout: timeoutMs });
+    const proc = spawn(FFMPEG, full, { stdio: ["ignore", "pipe", "pipe"] });
     let err = "";
-    proc.stderr?.on("data", (d) => {
+    let timedOut = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill("SIGKILL");
+    }, timeoutMs);
+
+    proc.stderr.on("data", (d: Buffer) => {
       err += d.toString();
+      if (err.length > 64_000) err = err.slice(-32_000); // keep the tail, bound the memory
     });
-    proc.on("close", (code) =>
-      code === 0
-        ? resolve()
-        : // Keep the tail of stderr AND strip ffmpeg's build banner, which otherwise
-          // fills the whole excerpt and hides the actual error.
-          reject(
-            new Error(
-              `${label} failed (exit ${code}): ${err
-                .split("\n")
-                .filter((l) => !/^\s*(configuration:|lib|built with)/.test(l))
-                .join("\n")
-                .slice(-700)}`
-            )
-          )
-    );
-    proc.on("error", reject);
+
+    // `-progress` writes key=value lines; out_time_us is the timestamp already written.
+    if (onProgress && totalSeconds) {
+      let buf = "";
+      proc.stdout.on("data", (d: Buffer) => {
+        buf += d.toString();
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) {
+          const m = /^out_time_us=(\d+)/.exec(line);
+          if (m) onProgress(Math.min(1, Number(m[1]) / 1e6 / totalSeconds));
+        }
+      });
+    } else {
+      proc.stdout.resume();
+    }
+
+    proc.on("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+
+    proc.on("close", (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) return resolve();
+
+      const tail = err
+        .split("\n")
+        .filter((l) => !/^\s*(configuration:|lib|built with)/.test(l))
+        .join("\n")
+        .slice(-700);
+
+      // A signal death says nothing about what went wrong unless it is named. These
+      // three are the ones that actually happen, and each has a different fix.
+      let why: string;
+      if (timedOut) why = `timed out after ${Math.round(timeoutMs / 1000)}s`;
+      else if (signal === "SIGKILL")
+        why = "killed by the OS (signal SIGKILL) — almost always the container running out of memory";
+      else if (signal) why = `killed by signal ${signal}`;
+      else if (/no space left on device/i.test(err)) why = "out of disk space";
+      else why = `exit ${code}`;
+
+      reject(new Error(`${label} failed (${why}): ${tail}`));
+    });
   });
 }
 
@@ -41,6 +130,26 @@ export const probe = (file: string, entries: string): Promise<string> =>
   );
 
 export const durationOf = async (file: string) => parseFloat(await probe(file, "format=duration"));
+
+/** Video track geometry and length, in one ffprobe call. */
+export async function videoInfo(file: string): Promise<{ width: number; height: number; seconds: number }> {
+  const out = await new Promise<string>((resolve, reject) =>
+    execFile(
+      FFPROBE,
+      [
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-show_entries", "format=duration",
+        "-of", "default=nw=1:nk=1",
+        file,
+      ],
+      (e, o) => (e ? reject(e) : resolve(o.trim()))
+    )
+  );
+  const [w, h, d] = out.split("\n").map((v) => parseFloat(v));
+  return { width: w, height: h, seconds: d };
+}
 
 /**
  * Frames sampled through a clip at NATIVE resolution, for the video-stage critic.
