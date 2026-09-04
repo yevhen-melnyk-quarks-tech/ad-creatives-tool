@@ -102,12 +102,25 @@ export async function repairLoop<T>(opts: {
   repairOnReview?: boolean;
   /** Constraints carried in from a previous run, so a re-roll is not blind. */
   seedAdditions?: string[];
+  /**
+   * Text appended AFTER the repair additions — the operator's own correction.
+   *
+   * Order is the point. A human looking at the output outranks anything the repair
+   * agent inferred, and a stale addition had been overriding a note that directly
+   * contradicted it ("do not draw John ... even if mentioned in the frame
+   * descriptions" beat an instruction to put John in both frames).
+   */
+  trailingInstruction?: string | null;
   generate: (prompt: string, attempt: number) => Promise<T>;
   critique: (result: T, prompt: string, attempt: number) => Promise<CriticReport>;
   onLog?: (m: string) => void;
 }): Promise<RepairOutcome<T>> {
   const additions: string[] = [...(opts.seedAdditions ?? [])];
-  let prompt = additions.length ? `${opts.basePrompt}\n\n${additions.join("\n")}` : opts.basePrompt;
+  const compose = () =>
+    [opts.basePrompt, additions.length ? additions.join("\n") : null, opts.trailingInstruction]
+      .filter(Boolean)
+      .join("\n\n");
+  let prompt = compose();
   if (additions.length) {
     opts.onLog?.(`  carrying ${additions.length} fix(es) forward from the previous run`);
   }
@@ -184,7 +197,7 @@ export async function repairLoop<T>(opts: {
       break;
     }
     additions.push(...fresh);
-    prompt = `${opts.basePrompt}\n\n${additions.join("\n")}`;
+    prompt = compose();
   }
 
   return {

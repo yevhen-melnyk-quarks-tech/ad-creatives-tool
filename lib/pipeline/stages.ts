@@ -96,16 +96,16 @@ function saveAdditions(projectId: string, kind: string, sceneId: string | null, 
  * QA critic cannot assess at all (any scene whose cast includes a child), so it has to
  * work with no critic report present.
  */
-function withOperatorNote(
+function operatorNoteBlock(
   basePrompt: string,
   projectId: string,
   kind: string,
   sceneId: string | null,
   log: Log,
   maxChars?: number
-): string {
+): string | null {
   const note = getNote(projectId, kind, sceneId);
-  if (!note) return basePrompt;
+  if (!note) return null;
 
   const header =
     "OPERATOR CORRECTIONS — CRITICAL, these come from a human reviewing the previous " +
@@ -119,7 +119,7 @@ function withOperatorNote(
     const room = maxChars - basePrompt.length - header.length - 2;
     if (room <= 0) {
       log(`  WARNING: no room left in the video prompt for your note — it was NOT applied. Shorten the scene's dialogue or action text.`);
-      return basePrompt;
+      return null;
     }
     if (body.length > room) {
       log(`  WARNING: your note is ${body.length} chars but only ${room} fit in the video prompt — it was trimmed. Shorten it to be sure nothing is lost.`);
@@ -128,7 +128,7 @@ function withOperatorNote(
   }
 
   log(`  applying your note: ${body.slice(0, 120)}${body.length > 120 ? "…" : ""}`);
-  return `${basePrompt}\n\n${header}${body}`;
+  return `${header}${body}`;
 }
 
 export async function runCharacterCard(opts: {
@@ -138,10 +138,8 @@ export async function runCharacterCard(opts: {
 }): Promise<{ report: CriticReport; accepted: boolean; path: string }> {
   await ensureProjectDirs(opts.projectId);
   const outPath = artifact.characterCard(opts.projectId);
-  const basePrompt = withOperatorNote(
-    generateCharacterCardPrompt(opts.scenario.characters),
-    opts.projectId, "character_card", null, opts.log
-  );
+  const basePrompt = generateCharacterCardPrompt(opts.scenario.characters);
+  const note = operatorNoteBlock(basePrompt, opts.projectId, "character_card", null, opts.log);
 
   const outcome = await repairLoop<string>({
     stage: "character card",
@@ -150,6 +148,7 @@ export async function runCharacterCard(opts: {
     maxAttempts: MAX_ATTEMPTS_IMAGE,
     repairOnReview: true,
     seedAdditions: previousAdditions(opts.projectId, "character_card", null),
+    trailingInstruction: note,
     onLog: opts.log,
     generate: async (prompt) => {
       await generateImage({ prompt, outPath, onLog: opts.log });
@@ -181,10 +180,8 @@ export async function runStoryboard(opts: {
   if (!(await exists(cardPath))) throw new Error("Character card must exist and be approved before storyboards");
 
   const outPath = artifact.storyboard(opts.projectId, opts.scene.id);
-  const basePrompt = withOperatorNote(
-    generateStoryboardPrompt(opts.scene, opts.scenario.characters),
-    opts.projectId, "storyboard", opts.scene.id, opts.log
-  );
+  const basePrompt = generateStoryboardPrompt(opts.scene, opts.scenario.characters);
+  const note = operatorNoteBlock(basePrompt, opts.projectId, "storyboard", opts.scene.id, opts.log);
 
   const outcome = await repairLoop<string>({
     stage: "storyboard",
@@ -196,6 +193,7 @@ export async function runStoryboard(opts: {
     // than bouncing straight back to the user with nothing tried.
     repairOnReview: true,
     seedAdditions: previousAdditions(opts.projectId, "storyboard", opts.scene.id),
+    trailingInstruction: note,
     onLog: opts.log,
     generate: async (prompt) => {
       await generateImage({ prompt, outPath, referencePaths: [cardPath], onLog: opts.log });
@@ -249,9 +247,9 @@ export async function runSceneVideo(opts: {
   if (duration !== opts.scene.durationSeconds) {
     opts.log(`  scene is ${opts.scene.durationSeconds}s, outside the model's range — rendering at ${duration}s`);
   }
-  const basePrompt = withOperatorNote(
-    generateSeedanceVideoPrompt(opts.scene, opts.scenario.characters),
-    opts.projectId, "video", opts.scene.id, opts.log, SEEDANCE_PROMPT_LIMIT
+  const basePrompt = generateSeedanceVideoPrompt(opts.scene, opts.scenario.characters);
+  const note = operatorNoteBlock(
+    basePrompt, opts.projectId, "video", opts.scene.id, opts.log, SEEDANCE_PROMPT_LIMIT
   );
   const costPerAttempt = duration * SEEDANCE_USD_PER_SEC_BY_RES[resolution];
 
@@ -266,6 +264,7 @@ export async function runSceneVideo(opts: {
     // No repairOnReview here: this stage is billed per attempt, so an
     // uncorroborated finding goes to a human instead of spending again.
     seedAdditions: previousAdditions(opts.projectId, "video", opts.scene.id),
+    trailingInstruction: note,
     onLog: opts.log,
     generate: async (prompt) => {
       // Reserved before the call and released after, so concurrent clips see each

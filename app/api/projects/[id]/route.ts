@@ -78,6 +78,21 @@ export async function PATCH(req: Request, { params }: Ctx) {
     db()
       .prepare(`UPDATE projects SET scenario_json=?, updated_at=datetime('now') WHERE id=?`)
       .run(JSON.stringify(normalized.scenario), id);
+
+    // Repair constraints were inferred against the OLD scenario, so replacing it makes
+    // them stale — and a stale one is not merely useless, it actively fights the new
+    // scenario. One read "do not draw John ... even if mentioned in the frame
+    // descriptions", which survived a cast repair and kept the protagonist out of his
+    // own scene on every subsequent re-roll. Artifacts and approvals are deliberately
+    // kept; only the inferred constraints are dropped.
+    const cleared = db()
+      .prepare(`UPDATE artifacts SET prompt_additions=NULL WHERE project_id=? AND prompt_additions IS NOT NULL`)
+      .run(id);
+    if (cleared.changes > 0) {
+      warnings.push(
+        `Cleared auto-repair constraints on ${cleared.changes} artifact(s) — they were inferred from the previous scenario. Approvals and generated files are untouched.`
+      );
+    }
   } else if (body.brief !== undefined) {
     // Re-parsing overwrites the scenario. This is the "tweak the Notion text and
     // regenerate" flow, so any per-artifact approvals from the old scenario are now
