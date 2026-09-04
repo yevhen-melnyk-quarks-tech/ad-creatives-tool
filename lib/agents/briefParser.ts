@@ -2,6 +2,7 @@ import { generateStructured, TEXT_MODEL } from "../models/gemini";
 import { estimateSceneDuration } from "../pipeline/timing";
 import { normalizeScenario } from "../pipeline/normalize";
 import { ScenarioSchema, type Scenario, type Character, type Frame } from "../pipeline/types";
+import { isDescriptorType } from "../pipeline/descriptors";
 import { estimateGeminiUsd, type Usage } from "../models/pricing";
 
 /**
@@ -37,6 +38,20 @@ const BRIEF_SCHEMA = {
           description: { type: "string" },
         },
         required: ["name", "tag", "description"],
+      },
+    },
+    // The brief's VER block. Absent from many briefs, hence an empty array rather
+    // than a required field.
+    versions: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          label: { type: "string" },
+          name: { type: "string" },
+          descriptorType: { type: "integer" },
+        },
+        required: ["label", "name", "descriptorType"],
       },
     },
     scenes: {
@@ -95,7 +110,7 @@ const BRIEF_SCHEMA = {
       },
     },
   },
-  required: ["title", "characters", "scenes"],
+  required: ["title", "characters", "scenes", "versions"],
 } as const;
 
 type RawCharacter = { name: string; tag: string; description: string };
@@ -117,7 +132,8 @@ type RawScene = {
   voiceDirections: { characterName: string; direction: string }[];
   frames: RawFrame[];
 };
-type RawBrief = { title: string; characters: RawCharacter[]; scenes: RawScene[] };
+type RawVersion = { label: string; name: string; descriptorType: number };
+type RawBrief = { title: string; characters: RawCharacter[]; scenes: RawScene[]; versions: RawVersion[] };
 
 // One real, validated character description, given to the model as a calibration
 // example so its inventions land at the same level of visual specificity — vague
@@ -142,6 +158,11 @@ function buildPrompt(rawText: string): string {
     CALIBRATION_EXAMPLE,
     "- `tag` is a compact ~15-word version of `description` for use in captions.",
     "- Treat every character with the same level of detail and dignity regardless of their role in the story — do not default a background or service character to a thinner description than a lead.",
+    "",
+    "VERSIONS AND DESCRIPTORS:",
+    "- If the brief has a versions block (often headed ВЕРСІЇ or VER), extract one entry per version: its label (\"VER 1\"), its name (\"Базова\", \"Basic\"), and the descriptor number it selects (a line like \"Дескриптор: 2\" or \"Descriptor: 2\").",
+    "- The descriptor number is 1, 2 or 3 and refers to the brief's own descriptor list: type 1 is a fictional story with no person shown, type 2 a fictional story that shows a person, type 3 an advertising message with neither. Report only the number; the exact legal wording is already known.",
+    "- If the brief has no versions block, return an empty versions array. Never invent one.",
     "",
     "SCENES:",
     "- Preserve every dialogue line VERBATIM in its original language and wording — never translate it, never invent a new line, never drop a line, never merge two lines into one.",
@@ -296,7 +317,20 @@ function hydrate(raw: RawBrief): Omit<BriefParseResult, "usd"> {
     };
   });
 
-  const scenario = { title: raw.title?.trim() || "Untitled", characters, scenes };
+  const versions = (raw.versions ?? [])
+    .filter((v) => isDescriptorType(v.descriptorType))
+    .map((v) => ({
+      label: v.label.trim() || "VER",
+      name: v.name.trim(),
+      descriptorType: v.descriptorType,
+    }));
+  for (const v of raw.versions ?? []) {
+    if (!isDescriptorType(v.descriptorType)) {
+      warnings.push(`Version "${v.label}" names descriptor ${v.descriptorType}, which is not one of the three types — dropped.`);
+    }
+  }
+
+  const scenario = { title: raw.title?.trim() || "Untitled", characters, scenes, versions };
   const parsed = ScenarioSchema.safeParse(scenario);
   if (!parsed.success) {
     throw new Error(

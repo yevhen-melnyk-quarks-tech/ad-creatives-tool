@@ -10,6 +10,11 @@ type Artifact = {
 };
 type SpendRow = { provider: string; operation: string; calls: number; usd: number };
 type Note = { kind: string; scene_id: string | null; note: string };
+type Disclaimer = {
+  type: number; text: string; source: string;
+  versions: { label: string; name: string; descriptorType: number }[];
+  options: { type: number; name: string }[];
+};
 type Job = {
   id: string; kind: string; status: string; error: string | null;
   progress: string | null; active_scene: string | null; payload: string | null;
@@ -41,6 +46,9 @@ export default function ProjectWorkspace(props: {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [qa, setQa] = useState<QaRow[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
+  const [disclaimer, setDisclaimer] = useState<Disclaimer | null>(null);
+  const [discDraft, setDiscDraft] = useState<string | null>(null);
+  const [savingDisc, setSavingDisc] = useState(false);
   const [spend, setSpend] = useState(props.initialSpendUsd);
   const [spendRows, setSpendRows] = useState<SpendRow[]>([]);
   const [spendOpen, setSpendOpen] = useState(false);
@@ -70,6 +78,7 @@ export default function ProjectWorkspace(props: {
     setDisk(detail.diskHuman ?? "0 B");
     setQa(qaRes.reports ?? []);
     setNotes(detail.notes ?? []);
+    setDisclaimer(detail.disclaimer ?? null);
     setHasLoaded(true);
   }, [projectId]);
 
@@ -101,6 +110,18 @@ export default function ProjectWorkspace(props: {
     });
     await refresh();
     setSavingRes(false);
+  }
+
+  async function saveDisclaimer(patch: { descriptorType?: number | null; disclaimerText?: string | null }) {
+    setSavingDisc(true);
+    await fetch(`/api/projects/${projectId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    setDiscDraft(null);
+    await refresh();
+    setSavingDisc(false);
   }
 
   async function saveNote(kind: string, sceneId: string | null, note: string) {
@@ -536,6 +557,75 @@ export default function ProjectWorkspace(props: {
 
           {/* Step 4 — captions + assembly */}
           <Step n={4} title="Captions & final assembly">
+            {disclaimer && (
+              <div className="mb-4 rounded border border-neutral-200 bg-neutral-50 p-3">
+                <p className="text-xs font-medium text-neutral-700">
+                  Legal descriptor burned into the final cut
+                </p>
+                <p className="mt-0.5 text-xs text-neutral-500">
+                  Type {disclaimer.type} — {disclaimer.source}
+                  {disclaimer.versions.length > 0 && (
+                    <>
+                      {" · brief lists "}
+                      {disclaimer.versions
+                        .map((v) => `${v.label}${v.name ? ` (${v.name})` : ""} → type ${v.descriptorType}`)
+                        .join(", ")}
+                    </>
+                  )}
+                </p>
+
+                <div className="mt-2 flex flex-wrap items-center gap-1">
+                  {disclaimer.options.map((o) => (
+                    <button
+                      key={o.type}
+                      title={o.name}
+                      disabled={savingDisc}
+                      onClick={() => saveDisclaimer({ descriptorType: o.type, disclaimerText: null })}
+                      className={`rounded px-2 py-0.5 text-xs font-medium transition-all active:scale-95 disabled:opacity-50 ${
+                        disclaimer.type === o.type ? "bg-neutral-900 text-white" : "bg-white text-neutral-600 border border-neutral-300"
+                      }`}
+                    >
+                      Type {o.type}
+                    </button>
+                  ))}
+                  {disclaimer.versions.length > 0 && (
+                    <button
+                      disabled={savingDisc}
+                      onClick={() => saveDisclaimer({ descriptorType: null, disclaimerText: null })}
+                      className="ml-1 text-xs text-neutral-500 underline transition-opacity active:opacity-60 disabled:opacity-50"
+                      title="Use whichever type the brief's version block selected"
+                    >
+                      use the brief&apos;s
+                    </button>
+                  )}
+                </div>
+
+                <textarea
+                  value={discDraft ?? disclaimer.text}
+                  onChange={(e) => setDiscDraft(e.target.value)}
+                  rows={2}
+                  className="mt-2 w-full rounded border border-neutral-300 px-2 py-1 text-xs outline-none focus:border-neutral-900"
+                />
+                <p className="mt-1 text-xs text-neutral-400">
+                  Exactly what gets burned. Edit it if the wording needs to differ; &quot;AI-generated.&quot; is set on
+                  its own bolder line, as in the reference ad.
+                </p>
+                {discDraft !== null && discDraft.trim() !== disclaimer.text && (
+                  <div className="mt-1 flex gap-2">
+                    <Btn small busy={savingDisc} onClick={() => saveDisclaimer({ disclaimerText: discDraft })}>
+                      Save wording
+                    </Btn>
+                    <button
+                      onClick={() => setDiscDraft(null)}
+                      className="text-xs text-neutral-500 underline transition-opacity active:opacity-60"
+                    >
+                      cancel
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="flex flex-wrap gap-2">
               <Btn onClick={() => startJob("captions")} busy={busy === "captions"}>
                 Build captions

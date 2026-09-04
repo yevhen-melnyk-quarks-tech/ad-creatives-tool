@@ -172,6 +172,30 @@ authored data rather than by searching the prose for the word "phone". A scenari
 no `charactersPresent` keeps the old assumption, which is correct for an ordinary
 face-to-face scene.
 
+## Legal descriptors and versions
+
+The brief carries three descriptors and a VER block selecting one:
+
+```
+Тип 1  Fictional story. Results not typical and may vary.
+Тип 2  AI-generated. Fictional story. Results not typical and may vary.
+Тип 3  Results not typical and may vary.
+
+VER 1 / Базова / Дескриптор: 2
+```
+
+The parser extracts every version with the descriptor number it selects, and step 4
+shows which descriptor the final cut will burn, where that came from, and the exact
+wording — pre-filled and editable. Precedence: text you edited, then a type you
+picked, then the type the brief's version block selected, then type 2 as the fallback,
+since that is the one required when a person is shown.
+
+Type 2 renders "AI-generated." on its own bolder line above the sentence, as the
+reference ad does. Types 1 and 3 have no prefix, so their single line moves up into
+that position rather than leaving a blank line above it. Editing the text keeps the
+same rule: a leading "AI-generated." becomes the bold line, anything else is rendered
+as one line rather than guessing where a custom sentence should break.
+
 ## Localization set
 
 Assembly writes a second cut alongside the final one:

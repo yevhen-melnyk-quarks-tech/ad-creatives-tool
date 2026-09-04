@@ -39,15 +39,30 @@ export const SceneSchema = z.object({
   voiceDirections: z.record(z.string(), z.string()).default({}),
 });
 
+/**
+ * One delivery version from the brief's VER block, e.g.
+ *   VER 1 / Базова / Дескриптор: 2
+ *
+ * A brief can list several, each selecting a different legal descriptor, so this is
+ * parsed as a list and the project picks which one it is assembling.
+ */
+export const VersionSchema = z.object({
+  label: z.string(),          // "VER 1"
+  name: z.string(),           // "Базова"
+  descriptorType: z.number(), // 1 | 2 | 3
+});
+
 export const ScenarioSchema = z.object({
   title: z.string(),
   characters: z.array(CharacterSchema),
   scenes: z.array(SceneSchema),
+  versions: z.array(VersionSchema).default([]),
 });
 
 export type Character = z.infer<typeof CharacterSchema>;
 export type Frame = z.infer<typeof FrameSchema>;
 export type Scene = z.infer<typeof SceneSchema>;
+export type Version = z.infer<typeof VersionSchema>;
 export type Scenario = z.infer<typeof ScenarioSchema>;
 
 export const totalDuration = (s: Scenario) =>

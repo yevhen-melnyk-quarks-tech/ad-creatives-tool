@@ -112,10 +112,23 @@ export async function assembleFinal(opts: AssembleOptions): Promise<AssembleResu
     "MarginV=70",
   ].join(",");
 
-  const disc1 = path.join(workDir, "disc1.txt");
-  const disc2 = path.join(workDir, "disc2.txt");
-  await writeFile(disc1, disclaimerBold, "utf-8");
-  await writeFile(disc2, disclaimerRegular, "utf-8");
+  // Descriptor types 1 and 3 have no bold prefix, only a single sentence. Rather than
+  // burning a blank line above it, the body moves up into the bold line's position so
+  // the block sits where the reference ad puts it either way.
+  const hasBold = Boolean(disclaimerBold.trim());
+  const discLines: { file: string; text: string; bold: boolean; y: number }[] = hasBold
+    ? [
+        { file: "disc1.txt", text: disclaimerBold, bold: true, y: Math.round(H * 0.795) },
+        { file: "disc2.txt", text: disclaimerRegular, bold: false, y: Math.round(H * 0.822) },
+      ]
+    : [{ file: "disc2.txt", text: disclaimerRegular, bold: false, y: Math.round(H * 0.795) }];
+
+  for (const l of discLines) await writeFile(path.join(workDir, l.file), l.text, "utf-8");
+  const discFilters = discLines.map(
+    (l) =>
+      `drawtext=fontfile='${esc(l.bold ? FONT_BOLD : FONT_REG)}':textfile='${esc(path.join(workDir, l.file))}':fontsize=${px(l.bold ? 17 : 16)}:fontcolor=white:x=(w-text_w)/2:y=${l.y}:shadowx=${px(1)}:shadowy=${px(1)}:shadowcolor=black@0.6`
+  );
+
 
   const hasCaptions = await exists(srtPath);
   if (!hasCaptions) onLog?.(`  (no captions.srt — burning disclaimer only)`);
@@ -127,8 +140,7 @@ export async function assembleFinal(opts: AssembleOptions): Promise<AssembleResu
     ...(hasCaptions
       ? [`subtitles='${esc(srtPath)}':fontsdir='${esc(path.dirname(FONT_BOLD))}':force_style='${captionStyle}'`]
       : []),
-    `drawtext=fontfile='${esc(FONT_BOLD)}':textfile='${esc(disc1)}':fontsize=${px(17)}:fontcolor=white:x=(w-text_w)/2:y=${Math.round(H * 0.795)}:shadowx=${px(1)}:shadowy=${px(1)}:shadowcolor=black@0.6`,
-    `drawtext=fontfile='${esc(FONT_REG)}':textfile='${esc(disc2)}':fontsize=${px(16)}:fontcolor=white:x=(w-text_w)/2:y=${Math.round(H * 0.822)}:shadowx=${px(1)}:shadowy=${px(1)}:shadowcolor=black@0.6`,
+    ...discFilters,
   ].join(",");
 
   const storyPath = path.join(workDir, "02_story.mp4");
@@ -185,8 +197,12 @@ export async function assembleFinal(opts: AssembleOptions): Promise<AssembleResu
     `[withlogo]drawtext=fontfile='${esc(FONT_BOLD)}':textfile='${esc(ctaTxt)}':fontsize=${px(76)}:fontcolor=white:x=${logoX - px(30)}-text_w:y=${rowY + px(30)}:shadowx=${px(2)}:shadowy=${px(2)}:shadowcolor=black@0.5:enable='gte(t,0.35)'[withtext]`,
     // Disclaimer redrawn crisply. The reference drops it on the CTA, but keeping the
     // AI disclosure across the whole ad is the safer call and costs nothing visually.
-    `[withtext]drawtext=fontfile='${esc(FONT_BOLD)}':textfile='${esc(disc1)}':fontsize=${px(17)}:fontcolor=white:x=(w-text_w)/2:y=${Math.round(H * 0.795)}:shadowx=${px(1)}:shadowy=${px(1)}:shadowcolor=black@0.6[withd1]`,
-    `[withd1]drawtext=fontfile='${esc(FONT_REG)}':textfile='${esc(disc2)}':fontsize=${px(16)}:fontcolor=white:x=(w-text_w)/2:y=${Math.round(H * 0.822)}:shadowx=${px(1)}:shadowy=${px(1)}:shadowcolor=black@0.6[withdisc]`,
+    // Same descriptor block, redrawn crisply over the frozen frame.
+    ...discFilters.map((f, i) => {
+      const inLabel = i === 0 ? "withtext" : `withd${i}`;
+      const outLabel = i === discFilters.length - 1 ? "withdisc" : `withd${i + 1}`;
+      return `[${inLabel}]${f}[${outLabel}]`;
+    }),
     // Chevrons bob to draw the eye toward the click target. Drawn as a PNG because
     // text glyphs rendered as literal letter "V"s. overlay's y accepts time
     // expressions, so a sine on t animates it.

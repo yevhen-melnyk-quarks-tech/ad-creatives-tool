@@ -118,6 +118,12 @@ function migrate(d: Database.Database) {
   // Render resolution for this project's clips. Defaults to 480p: it is markedly
   // cheaper and faster, which matters most while a project is still being iterated on.
   addColumnIfMissing(d, "projects", "video_resolution", "TEXT NOT NULL DEFAULT '480p'");
+
+  // Which legal descriptor the final cut carries, and the exact text if it was edited.
+  // Null descriptor_type means "whatever the brief's version block selected"; the
+  // pipeline previously hardcoded type 2 for every project regardless of the brief.
+  addColumnIfMissing(d, "projects", "descriptor_type", "INTEGER");
+  addColumnIfMissing(d, "projects", "disclaimer_text", "TEXT");
 }
 
 /**

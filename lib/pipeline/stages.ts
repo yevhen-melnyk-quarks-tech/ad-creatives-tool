@@ -16,6 +16,7 @@ import { repairLoop } from "../agents/repair";
 import { generateCharacterCardPrompt, generateStoryboardPrompt, generateSeedanceVideoPrompt, detectByName } from "./prompts";
 import { buildCaptions, coverageFindings, transcriptSrt, type SceneTranscript } from "./captions";
 import { clampDuration } from "./timing";
+import { DESCRIPTORS, descriptorText, splitDescriptor, isDescriptorType, type DescriptorType } from "./descriptors";
 import type { Scenario, Scene, Character } from "./types";
 import type { CriticReport } from "../agents/types";
 
@@ -432,6 +433,40 @@ export async function runCaptions(opts: {
 
 const offsetTotal = (ts: SceneTranscript[]) => ts.reduce((sum, t) => sum + t.durationSeconds, 0);
 
+/**
+ * The descriptor this project's cut should carry, and the text to burn.
+ *
+ * Order of precedence: text the operator edited, then the type they chose, then the
+ * type the brief's version block selected, then type 2 — the safest default, since it
+ * is the one required when a person is shown and these ads always show people.
+ */
+export function resolveDisclaimer(
+  projectId: string,
+  scenario: Scenario
+): { type: DescriptorType; bold: string; body: string; source: string } {
+  const row = db()
+    .prepare(`SELECT descriptor_type, disclaimer_text FROM projects WHERE id = ?`)
+    .get(projectId) as { descriptor_type: number | null; disclaimer_text: string | null } | undefined;
+
+  const fromBrief = scenario.versions.find((v) => isDescriptorType(v.descriptorType));
+  const type: DescriptorType = isDescriptorType(row?.descriptor_type)
+    ? row!.descriptor_type
+    : fromBrief
+      ? (fromBrief.descriptorType as DescriptorType)
+      : 2;
+
+  const source = isDescriptorType(row?.descriptor_type)
+    ? "chosen in the app"
+    : fromBrief
+      ? `from the brief (${fromBrief.label}${fromBrief.name ? ` — ${fromBrief.name}` : ""})`
+      : "default, the brief named no version";
+
+  if (row?.disclaimer_text?.trim()) {
+    return { type, ...splitDescriptor(row.disclaimer_text), source: "edited in the app" };
+  }
+  return { type, bold: DESCRIPTORS[type].bold, body: DESCRIPTORS[type].body, source };
+}
+
 export async function runAssembly(opts: {
   projectId: string;
   scenario: Scenario;
@@ -446,11 +481,19 @@ export async function runAssembly(opts: {
   if (!clipPaths.length) throw new Error("No scene clips available to assemble");
 
   const outPath = artifact.final(opts.projectId);
+  const disclaimer = resolveDisclaimer(opts.projectId, opts.scenario);
+  opts.log(
+    `  descriptor type ${disclaimer.type} (${disclaimer.source}): ` +
+      `"${[disclaimer.bold, disclaimer.body].filter(Boolean).join(" ")}"`
+  );
+
   const { storyDurationSeconds, totalDurationSeconds, cleanPath } = await assembleFinal({
     clipPaths,
     srtPath: artifact.captions(opts.projectId),
     outPath,
     workDir: artifact.work(opts.projectId),
+    disclaimerBold: disclaimer.bold,
+    disclaimerRegular: disclaimer.body,
     onLog: opts.log,
   });
 

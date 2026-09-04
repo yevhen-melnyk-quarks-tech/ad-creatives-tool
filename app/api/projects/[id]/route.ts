@@ -6,6 +6,8 @@ import { normalizeScenario } from "@/lib/pipeline/normalize";
 import { parseBrief } from "@/lib/agents/briefParser";
 import { RATES_ARE_DEFAULTS } from "@/lib/models/pricing";
 import { VIDEO_RESOLUTIONS, SEEDANCE_480_RATE_IS_ESTIMATE, type VideoResolution } from "@/lib/models/replicate";
+import { isDescriptorType, DESCRIPTORS } from "@/lib/pipeline/descriptors";
+import { resolveDisclaimer } from "@/lib/pipeline/stages";
 
 export const dynamic = "force-dynamic";
 
@@ -39,10 +41,28 @@ export async function GET(_req: Request, { params }: Ctx) {
     )
     .all(id);
 
+  // What the final cut would actually burn right now, resolved the same way assembly
+  // resolves it — so the UI cannot show something different from what ships.
+  let disclaimer: unknown = null;
+  const scenarioJson = project.scenario_json as string | null;
+  if (scenarioJson) {
+    const parsed = ScenarioSchema.safeParse(JSON.parse(scenarioJson));
+    if (parsed.success) {
+      const r = resolveDisclaimer(id, parsed.data);
+      disclaimer = {
+        ...r,
+        text: [r.bold, r.body].filter(Boolean).join(" "),
+        versions: parsed.data.versions,
+        options: Object.entries(DESCRIPTORS).map(([type, d]) => ({ type: Number(type), name: d.name })),
+      };
+    }
+  }
+
   return NextResponse.json({
     project,
     artifacts,
     jobs,
+    disclaimer,
     spendUsd: projectSpendUsd(id),
     spendBreakdown,
     notes: listNotes(id),
@@ -56,7 +76,10 @@ export async function GET(_req: Request, { params }: Ctx) {
 export async function PATCH(req: Request, { params }: Ctx) {
   const { id } = await params;
   const body = (await req.json().catch(() => null)) as
-    | { scenario?: unknown; title?: string; brief?: string; videoResolution?: string }
+    | {
+        scenario?: unknown; title?: string; brief?: string; videoResolution?: string;
+        descriptorType?: number | null; disclaimerText?: string | null;
+      }
     | null;
   if (!body) return NextResponse.json({ error: "invalid body" }, { status: 400 });
 
@@ -121,6 +144,22 @@ export async function PATCH(req: Request, { params }: Ctx) {
 
   if (body.title) {
     db().prepare(`UPDATE projects SET title=?, updated_at=datetime('now') WHERE id=?`).run(body.title, id);
+  }
+  if (body.descriptorType !== undefined) {
+    if (body.descriptorType !== null && !isDescriptorType(body.descriptorType)) {
+      return NextResponse.json({ error: "descriptorType must be 1, 2, 3 or null" }, { status: 400 });
+    }
+    // Null resets to whatever the brief's version block selected.
+    db()
+      .prepare(`UPDATE projects SET descriptor_type=?, updated_at=datetime('now') WHERE id=?`)
+      .run(body.descriptorType, id);
+  }
+  if (body.disclaimerText !== undefined) {
+    // Empty string clears the override so the descriptor's official wording is used.
+    const text = body.disclaimerText?.trim() ? body.disclaimerText.trim() : null;
+    db()
+      .prepare(`UPDATE projects SET disclaimer_text=?, updated_at=datetime('now') WHERE id=?`)
+      .run(text, id);
   }
   if (body.videoResolution !== undefined) {
     if (!VIDEO_RESOLUTIONS.includes(body.videoResolution as VideoResolution)) {
