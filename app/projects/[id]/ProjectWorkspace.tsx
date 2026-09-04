@@ -256,13 +256,13 @@ export default function ProjectWorkspace(props: {
                   <tbody>
                     {spendRows.length === 0 && (
                       <tr>
-                        <td className="py-1 text-neutral-400">Nothing spent yet.</td>
+                        <td className="py-1 text-neutral-500">Nothing spent yet.</td>
                       </tr>
                     )}
                     {spendRows.map((r) => (
                       <tr key={`${r.provider}:${r.operation}`}>
                         <td className="py-0.5 pr-2">{r.operation}</td>
-                        <td className="py-0.5 pr-2 text-neutral-400">x{r.calls}</td>
+                        <td className="py-0.5 pr-2 text-neutral-500">x{r.calls}</td>
                         <td className="py-0.5 text-right tabular-nums">${r.usd.toFixed(3)}</td>
                       </tr>
                     ))}
@@ -303,7 +303,7 @@ export default function ProjectWorkspace(props: {
           className="flex w-full items-center justify-between text-left text-sm font-medium transition-opacity active:opacity-60"
         >
           <span>Brief {scenario ? "(edit and re-parse)" : "— paste one to begin"}</span>
-          <span className="text-xs text-neutral-400">{briefOpen ? "hide" : "show"}</span>
+          <span className="text-xs text-neutral-500">{briefOpen ? "hide" : "show"}</span>
         </button>
         {briefOpen && (
           <div className="mt-3">
@@ -485,7 +485,7 @@ export default function ProjectWorkspace(props: {
                   </button>
                 ))}
               </div>
-              <span className="text-xs text-neutral-400">
+              <span className="text-xs text-neutral-500">
                 {resolution === "480p"
                   ? "cheaper and faster — good while iterating"
                   : "full quality — use for the final render"}
@@ -546,7 +546,7 @@ export default function ProjectWorkspace(props: {
                         />
                       )}
                       {!sheetApproved && (
-                        <p className="text-xs text-neutral-400">Approve this storyboard first.</p>
+                        <p className="text-xs text-neutral-500">Approve this storyboard first.</p>
                       )}
                     </div>
                   </div>
@@ -606,7 +606,7 @@ export default function ProjectWorkspace(props: {
                   rows={2}
                   className="mt-2 w-full rounded border border-neutral-300 px-2 py-1 text-xs outline-none focus:border-neutral-900"
                 />
-                <p className="mt-1 text-xs text-neutral-400">
+                <p className="mt-1 text-xs text-neutral-500">
                   Exactly what gets burned. Edit it if the wording needs to differ; &quot;AI-generated.&quot; is set on
                   its own bolder line, as in the reference ad.
                 </p>
@@ -743,7 +743,7 @@ function NoteBox({
             clear
           </button>
         )}
-        <span className="text-xs text-neutral-400">
+        <span className="text-xs text-neutral-500">
           {initial ? "a note is saved and will be reapplied" : "applied on the next attempt"}
         </span>
       </div>
@@ -782,7 +782,7 @@ function Step({ n, title, children }: { n: number; title: string; children: Reac
 }
 
 function Verdict({ report }: { report?: CriticReport }) {
-  if (!report) return <p className="text-xs text-neutral-400">No QA run yet.</p>;
+  if (!report) return <p className="text-xs text-neutral-500">No QA run yet.</p>;
   const blocking = report.findings.filter((f) => f.blocking);
   const advisory = report.findings.filter((f) => !f.blocking);
 
@@ -791,7 +791,7 @@ function Verdict({ report }: { report?: CriticReport }) {
       <p className="flex items-center gap-2 text-xs">
         <span className={`rounded px-1.5 py-0.5 font-medium ${VERDICT_STYLE[report.verdict] ?? ""}`}>{report.verdict}</span>
         {report.consensus && (
-          <span className="text-neutral-400">
+          <span className="text-neutral-500">
             {report.consensus.failVotes}/{report.consensus.samples} passes flagged it
           </span>
         )}

@@ -42,7 +42,7 @@ export default function Home() {
                 >
                   <span>
                     <span className="font-medium">{p.title}</span>
-                    <span className="ml-3 text-xs text-neutral-400">{p.created_at}</span>
+                    <span className="ml-3 text-xs text-neutral-500">{p.created_at}</span>
                   </span>
                   <span className="rounded-full bg-neutral-100 px-2 py-0.5 text-xs text-neutral-600">{p.status}</span>
                 </Link>

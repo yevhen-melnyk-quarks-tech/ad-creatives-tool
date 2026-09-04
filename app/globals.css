@@ -1,6 +1,22 @@
 @import "tailwindcss";
 
+/*
+ * This interface is deliberately single-theme light.
+ *
+ * Every surface in it is built from white and light neutrals — cards, panels, note
+ * boxes, form fields. The scaffold shipped a `prefers-color-scheme: dark` block that
+ * flipped --foreground to near-white while leaving those surfaces light, so on a
+ * dark-mode machine the page chrome went black and every panel rendered near-white
+ * text on a white card: the legal descriptor and every note box were literally
+ * unreadable.
+ *
+ * Rather than half-support dark mode, the theme is pinned. `color-scheme: light` is
+ * the load-bearing part — without it the browser styles textareas and inputs with its
+ * own dark-mode defaults regardless of what the page says, which is what made the
+ * descriptor field's text invisible even where a colour was set on the container.
+ */
 :root {
+  color-scheme: light;
   --background: #ffffff;
   --foreground: #171717;
 }
@@ -12,15 +28,28 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
+
+/*
+ * Form controls state their own colours instead of inheriting. A field that inherits
+ * is one browser default away from being unreadable again, and these carry the legal
+ * descriptor and the operator's correction notes — the two places where invisible text
+ * does real damage.
+ */
+input,
+textarea,
+select {
+  color: #171717;
+  background-color: #ffffff;
+}
+
+input::placeholder,
+textarea::placeholder {
+  /* 4.6:1 on white. The scaffold's lighter grey sat at roughly 2.8:1 and failed AA. */
+  color: #737373;
+  opacity: 1; /* Firefox dims placeholders by default, compounding the problem. */
 }

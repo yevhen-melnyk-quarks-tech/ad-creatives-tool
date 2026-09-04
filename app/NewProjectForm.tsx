@@ -161,7 +161,7 @@ export default function NewProjectForm() {
         className="mt-2 w-full rounded-md border border-neutral-300 px-3 py-2 text-xs font-mono outline-none focus:border-neutral-900"
       />
       {mode === "brief" && (
-        <p className="mt-1 text-xs text-neutral-400">
+        <p className="mt-1 text-xs text-neutral-500">
           An agent will split this into characters and scenes — leave it empty to author the scenario later.
         </p>
       )}
