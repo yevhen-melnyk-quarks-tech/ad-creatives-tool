@@ -13,10 +13,10 @@ import { assembleFinal } from "../media/assemble";
 import { checkAssembly } from "../agents/assemblyCheck";
 import { critiqueCharacterCard, critiqueStoryboard, critiqueVideoScene } from "../agents/critics";
 import { repairLoop } from "../agents/repair";
-import { generateCharacterCardPrompt, generateStoryboardPrompt, generateSeedanceVideoPrompt } from "./prompts";
+import { generateCharacterCardPrompt, generateStoryboardPrompt, generateSeedanceVideoPrompt, detectByName } from "./prompts";
 import { buildCaptions, coverageFindings, transcriptSrt, type SceneTranscript } from "./captions";
 import { clampDuration } from "./timing";
-import type { Scenario, Scene } from "./types";
+import type { Scenario, Scene, Character } from "./types";
 import type { CriticReport } from "../agents/types";
 
 type Log = (m: string) => void;
@@ -59,6 +59,29 @@ function upsertArtifact(row: {
  * started from the untouched base prompt, re-discovered the same defect, and burned
  * its attempts re-deriving fixes the previous run had already worked out.
  */
+/**
+ * Widens a scene's cast with anyone the operator's note names.
+ *
+ * If a human writes "put Mia and Liam a few steps ahead", those characters are in the
+ * scene — full stop. Without this the note and the cast disagree, and the machinery
+ * turns on itself: the critic reports the children as uncast intruders and the repair
+ * agent writes constraints to remove the very people that were just asked for.
+ *
+ * Applied at generation time rather than at ingest, because a note can be written or
+ * changed long after the scenario was stored.
+ */
+function widenCastForNote(scene: Scene, note: string | null, allCharacters: Character[]): Scene {
+  if (!note) return scene;
+  const named = detectByName(note, allCharacters);
+  const missing = named.filter((c) => !scene.charactersInScene.some((x) => x.id === c.id));
+  if (!missing.length) return scene;
+
+  const ordered = allCharacters.filter((c) =>
+    [...scene.charactersInScene, ...missing].some((x) => x.id === c.id)
+  );
+  return { ...scene, charactersInScene: ordered };
+}
+
 /** The project's chosen render resolution, defaulting to the cheaper 480p. */
 function projectResolution(projectId: string): VideoResolution {
   const row = db()
@@ -180,7 +203,14 @@ export async function runStoryboard(opts: {
   if (!(await exists(cardPath))) throw new Error("Character card must exist and be approved before storyboards");
 
   const outPath = artifact.storyboard(opts.projectId, opts.scene.id);
-  const basePrompt = generateStoryboardPrompt(opts.scene, opts.scenario.characters);
+  const rawNote = getNote(opts.projectId, "storyboard", opts.scene.id);
+  // The widened scene is used for the prompt AND the critic, so both agree on who
+  // belongs here; otherwise the critic reports the operator's own additions as intruders.
+  const scene = widenCastForNote(opts.scene, rawNote, opts.scenario.characters);
+  if (scene.charactersInScene.length !== opts.scene.charactersInScene.length) {
+    opts.log(`  your note names ${scene.charactersInScene.map((c) => c.name).join(", ")} — added to this scene's cast`);
+  }
+  const basePrompt = generateStoryboardPrompt(scene, opts.scenario.characters);
   const note = operatorNoteBlock(basePrompt, opts.projectId, "storyboard", opts.scene.id, opts.log);
 
   const outcome = await repairLoop<string>({
@@ -212,7 +242,7 @@ export async function runStoryboard(opts: {
         projectId: opts.projectId,
         cardPath,
         sheetPath: outPath,
-        scene: opts.scene,
+        scene,
         attempt,
         // Two samples on the pre-spend gate: this verdict decides whether money gets
         // spent, and single-sample critic judgement is not reproducible on borderline
@@ -247,7 +277,9 @@ export async function runSceneVideo(opts: {
   if (duration !== opts.scene.durationSeconds) {
     opts.log(`  scene is ${opts.scene.durationSeconds}s, outside the model's range — rendering at ${duration}s`);
   }
-  const basePrompt = generateSeedanceVideoPrompt(opts.scene, opts.scenario.characters);
+  const rawNote = getNote(opts.projectId, "video", opts.scene.id);
+  const scene = widenCastForNote(opts.scene, rawNote, opts.scenario.characters);
+  const basePrompt = generateSeedanceVideoPrompt(scene, opts.scenario.characters);
   const note = operatorNoteBlock(
     basePrompt, opts.projectId, "video", opts.scene.id, opts.log, SEEDANCE_PROMPT_LIMIT
   );
@@ -319,7 +351,7 @@ export async function runSceneVideo(opts: {
         projectId: opts.projectId,
         cardPath,
         framePaths: frames,
-        scene: opts.scene,
+        scene,
         attempt,
         samples: 2,
         onLog: opts.log,
