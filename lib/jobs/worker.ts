@@ -1,4 +1,6 @@
-import { db, uid } from "../db";
+import { db, uid, recordCost } from "../db";
+import { setUsageSink } from "../models/usageTracker";
+import { estimateGeminiUsd } from "../models/pricing";
 import { ScenarioSchema, type Scenario } from "../pipeline/types";
 import { runCharacterCard, runStoryboard, runSceneVideo, runCaptions, runAssembly } from "../pipeline/stages";
 
@@ -62,6 +64,21 @@ async function tick() {
   db().prepare(`UPDATE jobs SET status='running', started_at=datetime('now') WHERE id = ?`).run(job.id);
   const log = (m: string) => appendProgress(job.id, m);
 
+  // Bill every Gemini call made anywhere beneath this job — image generation and all
+  // agent calls — to the project that caused it. Safe as ambient state only because
+  // jobs are strictly serialized; see lib/models/usageTracker.ts.
+  setUsageSink((usage, operation) => {
+    const usd = estimateGeminiUsd(usage);
+    if (usd <= 0 && usage.images === 0) return;
+    recordCost({
+      projectId: job.project_id,
+      provider: "gemini",
+      operation,
+      usd,
+      detail: `${usage.images} image(s), ${usage.promptTokens} in / ${usage.outputTokens} out tokens`,
+    });
+  });
+
   try {
     await execute(job.id, job.project_id, job.kind, JSON.parse(job.payload), log);
     db().prepare(`UPDATE jobs SET status='done', finished_at=datetime('now') WHERE id = ?`).run(job.id);
@@ -72,6 +89,7 @@ async function tick() {
       .prepare(`UPDATE jobs SET status='failed', error=?, finished_at=datetime('now') WHERE id = ?`)
       .run(msg, job.id);
   } finally {
+    setUsageSink(null);
     running = false;
   }
 }

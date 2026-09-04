@@ -1,6 +1,8 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fetchRetry, readJson } from "./http";
+import type { Usage } from "./pricing";
+import { reportUsage } from "./usageTracker";
 
 const BASE = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -36,7 +38,16 @@ const toInline = async (filePath: string): Promise<InlineImage> => ({
 type GeminiResponse = {
   candidates?: { content?: { parts?: { text?: string; inlineData?: InlineImage }[] } }[];
   promptFeedback?: { blockReason?: string };
+  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number };
 };
+
+// Every call reports what it consumed so the caller can price it. Without this the
+// project spend figure silently excluded all image generation and all agent calls.
+const usageOf = (json: GeminiResponse, images: number): Usage => ({
+  promptTokens: json.usageMetadata?.promptTokenCount ?? 0,
+  outputTokens: json.usageMetadata?.candidatesTokenCount ?? 0,
+  images,
+});
 
 /** Generates an image and writes it to `outPath`. Reference images steer consistency. */
 export async function generateImage(opts: {
@@ -44,6 +55,7 @@ export async function generateImage(opts: {
   outPath: string;
   referencePaths?: string[];
   onLog?: (m: string) => void;
+  onUsage?: (u: Usage) => void;
 }): Promise<void> {
   const parts: ({ text: string } | { inlineData: InlineImage })[] = [{ text: opts.prompt }];
   for (const ref of opts.referencePaths ?? []) parts.push({ inlineData: await toInline(ref) });
@@ -65,10 +77,16 @@ export async function generateImage(opts: {
   );
 
   const json = await readJson<GeminiResponse>(res, "Image generation");
+  const image = json.candidates?.[0]?.content?.parts?.find((p) => p.inlineData)?.inlineData;
+  // Reported before the failure checks below: a blocked or empty response is still
+  // billed for the tokens it consumed, so skipping it would under-count spend.
+  const imageUsage = usageOf(json, image ? 1 : 0);
+  opts.onUsage?.(imageUsage);
+  reportUsage(imageUsage, "image");
+
   if (json.promptFeedback?.blockReason) {
     throw new Error(`Image generation blocked: ${json.promptFeedback.blockReason}`);
   }
-  const image = json.candidates?.[0]?.content?.parts?.find((p) => p.inlineData)?.inlineData;
   if (!image) throw new Error("Image generation returned no image part");
 
   await mkdir(path.dirname(opts.outPath), { recursive: true });
@@ -85,7 +103,10 @@ export async function generateStructured<T>(opts: {
   imagePaths?: string[];
   schema: Record<string, unknown>;
   model?: string;
+  /** Cost-ledger label for this call, e.g. "critic" or "repair". */
+  label?: string;
   onLog?: (m: string) => void;
+  onUsage?: (u: Usage) => void;
 }): Promise<T> {
   const parts: ({ text: string } | { inlineData: InlineImage })[] = [{ text: opts.prompt }];
   for (const p of opts.imagePaths ?? []) parts.push({ inlineData: await toInline(p) });
@@ -111,6 +132,9 @@ export async function generateStructured<T>(opts: {
   );
 
   const json = await readJson<GeminiResponse>(res, "Structured generation");
+  const agentUsage = usageOf(json, 0);
+  opts.onUsage?.(agentUsage);
+  reportUsage(agentUsage, opts.label ?? "agent");
   if (json.promptFeedback?.blockReason) {
     throw new Error(`Blocked: ${json.promptFeedback.blockReason}`);
   }

@@ -29,7 +29,14 @@ export async function planRepair(opts: {
   report: CriticReport;
   onLog?: (m: string) => void;
 }): Promise<RepairPlan> {
-  const problems = blockingFindings(opts.report)
+  // On a REVIEW the samples disagreed, so every finding was demoted to advisory and
+  // there are no blocking ones left. Those advisories are exactly the
+  // real-but-uncorroborated problems, so fall back to them rather than asking the
+  // repair agent to fix an empty list.
+  const blocking = blockingFindings(opts.report);
+  const toFix = blocking.length ? blocking : opts.report.findings;
+
+  const problems = toFix
     .map((f) => `- [${f.category}] ${f.subject ? `${f.subject}: ` : ""}${f.detail}`)
     .join("\n");
 
@@ -55,6 +62,7 @@ export async function planRepair(opts: {
   return generateStructured<RepairPlan>({
     prompt,
     schema: REPAIR_SCHEMA as unknown as Record<string, unknown>,
+    label: "repair",
     model: TEXT_MODEL,
     onLog: opts.onLog,
   });
@@ -85,15 +93,28 @@ export async function repairLoop<T>(opts: {
   maxAttempts: number;
   costPerAttemptUsd?: number;
   budgetUsd?: number;
+  /**
+   * Attempt a repair when the verdict is REVIEW rather than stopping.
+   * True for cheap image stages — a REVIEW there is worth one more free-ish roll.
+   * False for paid video, where re-rolling on findings the samples disagreed about
+   * means spending real money chasing noise.
+   */
+  repairOnReview?: boolean;
+  /** Constraints carried in from a previous run, so a re-roll is not blind. */
+  seedAdditions?: string[];
   generate: (prompt: string, attempt: number) => Promise<T>;
   critique: (result: T, prompt: string, attempt: number) => Promise<CriticReport>;
   onLog?: (m: string) => void;
 }): Promise<RepairOutcome<T>> {
-  const additions: string[] = [];
-  let prompt = opts.basePrompt;
+  const additions: string[] = [...(opts.seedAdditions ?? [])];
+  let prompt = additions.length ? `${opts.basePrompt}\n\n${additions.join("\n")}` : opts.basePrompt;
+  if (additions.length) {
+    opts.onLog?.(`  carrying ${additions.length} fix(es) forward from the previous run`);
+  }
   let lastResult!: T;
   let lastReport!: CriticReport;
   let stoppedBy: RepairOutcome<T>["stoppedBy"];
+  let attemptsMade = 0;
 
   for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
     if (opts.costPerAttemptUsd && opts.budgetUsd !== undefined) {
@@ -107,6 +128,7 @@ export async function repairLoop<T>(opts: {
       }
     }
 
+    attemptsMade = attempt;
     opts.onLog?.(`  ${opts.stage}${opts.sceneId ? ` ${opts.sceneId}` : ""}: attempt ${attempt}/${opts.maxAttempts}`);
     lastResult = await opts.generate(prompt, attempt);
     lastReport = await opts.critique(lastResult, prompt, attempt);
@@ -115,10 +137,20 @@ export async function repairLoop<T>(opts: {
       return { result: lastResult, attempts: attempt, finalReport: lastReport, accepted: true, appliedAdditions: additions };
     }
 
-    // REVIEW means the critics disagreed. Re-rolling on an uncorroborated finding
-    // spends money chasing noise, so stop and let a human look instead.
-    if (lastReport.verdict === "REVIEW") {
+    // Nothing was assessed, so there is nothing to repair and retrying would just
+    // hit the same filter.
+    if (lastReport.verdict === "UNAVAILABLE") {
+      opts.onLog?.(`  QA unavailable — ${lastReport.summary}`);
+      break;
+    }
+
+    // REVIEW means the samples disagreed about whether this is a real defect.
+    if (lastReport.verdict === "REVIEW" && !opts.repairOnReview) {
       opts.onLog?.(`  verdict REVIEW — not corroborated across samples, leaving for human review`);
+      break;
+    }
+    if (lastReport.verdict === "REVIEW" && lastReport.findings.length === 0) {
+      opts.onLog?.(`  verdict REVIEW with nothing specific to fix — leaving for human review`);
       break;
     }
 
@@ -144,7 +176,7 @@ export async function repairLoop<T>(opts: {
 
   return {
     result: lastResult,
-    attempts: additions.length + 1,
+    attempts: attemptsMade,
     finalReport: lastReport,
     accepted: false,
     appliedAdditions: additions,

@@ -44,6 +44,32 @@ function upsertArtifact(row: {
     .run({ id: uid(), sceneId: row.sceneId ?? null, ...row });
 }
 
+/**
+ * Constraints the repair agent applied last time this artifact was generated.
+ *
+ * This is what makes a re-roll better than a reshuffle: without it, every re-roll
+ * started from the untouched base prompt, re-discovered the same defect, and burned
+ * its attempts re-deriving fixes the previous run had already worked out.
+ */
+function previousAdditions(projectId: string, kind: string, sceneId: string | null): string[] {
+  const row = db()
+    .prepare(`SELECT prompt_additions FROM artifacts WHERE project_id=? AND kind=? AND scene_id IS ?`)
+    .get(projectId, kind, sceneId) as { prompt_additions: string | null } | undefined;
+  if (!row?.prompt_additions) return [];
+  try {
+    const parsed = JSON.parse(row.prompt_additions);
+    return Array.isArray(parsed) ? (parsed as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveAdditions(projectId: string, kind: string, sceneId: string | null, additions: string[]) {
+  db()
+    .prepare(`UPDATE artifacts SET prompt_additions=? WHERE project_id=? AND kind=? AND scene_id IS ?`)
+    .run(additions.length ? JSON.stringify(additions) : null, projectId, kind, sceneId);
+}
+
 export async function runCharacterCard(opts: {
   projectId: string;
   scenario: Scenario;
@@ -58,6 +84,8 @@ export async function runCharacterCard(opts: {
     projectId: opts.projectId,
     basePrompt,
     maxAttempts: MAX_ATTEMPTS_IMAGE,
+    repairOnReview: true,
+    seedAdditions: previousAdditions(opts.projectId, "character_card", null),
     onLog: opts.log,
     generate: async (prompt) => {
       await generateImage({ prompt, outPath, onLog: opts.log });
@@ -75,6 +103,7 @@ export async function runCharacterCard(opts: {
     },
   });
 
+  saveAdditions(opts.projectId, "character_card", null, outcome.appliedAdditions);
   return { report: outcome.finalReport, accepted: outcome.accepted, path: outPath };
 }
 
@@ -96,6 +125,10 @@ export async function runStoryboard(opts: {
     sceneId: opts.scene.id,
     basePrompt,
     maxAttempts: MAX_ATTEMPTS_IMAGE,
+    // A storyboard re-roll is cheap, so a REVIEW is worth one more attempt rather
+    // than bouncing straight back to the user with nothing tried.
+    repairOnReview: true,
+    seedAdditions: previousAdditions(opts.projectId, "storyboard", opts.scene.id),
     onLog: opts.log,
     generate: async (prompt) => {
       await generateImage({ prompt, outPath, referencePaths: [cardPath], onLog: opts.log });
@@ -125,6 +158,7 @@ export async function runStoryboard(opts: {
     },
   });
 
+  saveAdditions(opts.projectId, "storyboard", opts.scene.id, outcome.appliedAdditions);
   return { report: outcome.finalReport, accepted: outcome.accepted, path: outPath };
 }
 
@@ -152,6 +186,9 @@ export async function runSceneVideo(opts: {
     maxAttempts: MAX_ATTEMPTS_VIDEO,
     costPerAttemptUsd: costPerAttempt,
     budgetUsd: PROJECT_BUDGET_USD,
+    // No repairOnReview here: this stage is billed per attempt, so an
+    // uncorroborated finding goes to a human instead of spending again.
+    seedAdditions: previousAdditions(opts.projectId, "video", opts.scene.id),
     onLog: opts.log,
     generate: async (prompt) => {
       const { predictionId, usd } = await generateVideo({
@@ -195,6 +232,8 @@ export async function runSceneVideo(opts: {
       });
     },
   });
+
+  saveAdditions(opts.projectId, "video", opts.scene.id, outcome.appliedAdditions);
 
   if (outcome.stoppedBy === "budget") {
     opts.log(

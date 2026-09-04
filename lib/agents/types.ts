@@ -1,4 +1,9 @@
-export type Verdict = "PASS" | "REVIEW" | "FAIL";
+/**
+ * UNAVAILABLE is distinct from REVIEW on purpose: it means no judgement was made at
+ * all, not that the judgement was uncertain. Showing a failed critic as REVIEW made
+ * it look like the sheet had been assessed and found borderline.
+ */
+export type Verdict = "PASS" | "REVIEW" | "FAIL" | "UNAVAILABLE";
 
 /**
  * One thing a critic noticed.

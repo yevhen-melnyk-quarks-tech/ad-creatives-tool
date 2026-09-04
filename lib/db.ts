@@ -90,6 +90,24 @@ function migrate(d: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_qa_project     ON qa_runs(project_id, stage);
     CREATE INDEX IF NOT EXISTS idx_costs_project  ON costs(project_id);
   `);
+
+  // Repair constraints the agent applied to produce this artifact, so a re-roll can
+  // build on them and the UI can show what was actually changed.
+  addColumnIfMissing(d, "artifacts", "prompt_additions", "TEXT");
+}
+
+/**
+ * Adds a column to an existing table if it is not already there.
+ *
+ * `CREATE TABLE IF NOT EXISTS` cannot evolve a table that already has rows, and this
+ * database lives on a mounted volume that survives redeploys — so new columns need an
+ * explicit, idempotent migration rather than a schema edit.
+ */
+function addColumnIfMissing(d: Database.Database, table: string, column: string, definition: string) {
+  const cols = d.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === column)) {
+    d.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
 }
 
 export const uid = () =>

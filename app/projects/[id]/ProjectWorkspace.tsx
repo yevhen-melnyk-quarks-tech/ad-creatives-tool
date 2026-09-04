@@ -4,7 +4,11 @@ import { useCallback, useEffect, useState } from "react";
 import type { Scenario } from "@/lib/pipeline/types";
 import type { CriticReport } from "@/lib/agents/types";
 
-type Artifact = { kind: string; scene_id: string | null; file_path: string; attempt: number; approved: number };
+type Artifact = {
+  kind: string; scene_id: string | null; file_path: string; attempt: number; approved: number;
+  prompt_additions: string | null;
+};
+type SpendRow = { provider: string; operation: string; calls: number; usd: number };
 type Job = { id: string; kind: string; status: string; error: string | null; progress: string | null };
 type QaRow = { stage: string; scene_id: string | null; verdict: string; report: CriticReport };
 
@@ -12,6 +16,7 @@ const VERDICT_STYLE: Record<string, string> = {
   PASS: "bg-green-100 text-green-800",
   REVIEW: "bg-amber-100 text-amber-800",
   FAIL: "bg-red-100 text-red-800",
+  UNAVAILABLE: "bg-neutral-200 text-neutral-700",
   ERROR: "bg-neutral-200 text-neutral-700",
 };
 
@@ -31,6 +36,9 @@ export default function ProjectWorkspace(props: {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [qa, setQa] = useState<QaRow[]>([]);
   const [spend, setSpend] = useState(props.initialSpendUsd);
+  const [spendRows, setSpendRows] = useState<SpendRow[]>([]);
+  const [spendOpen, setSpendOpen] = useState(false);
+  const [ratesAreDefaults, setRatesAreDefaults] = useState(false);
   const [disk, setDisk] = useState(props.initialDiskHuman);
   const [busy, setBusy] = useState<string | null>(null);
   const [hasLoaded, setHasLoaded] = useState(false);
@@ -49,6 +57,8 @@ export default function ProjectWorkspace(props: {
     setArtifacts(detail.artifacts ?? []);
     setJobs(detail.jobs ?? []);
     setSpend(detail.spendUsd ?? 0);
+    setSpendRows(detail.spendBreakdown ?? []);
+    setRatesAreDefaults(Boolean(detail.spendRatesAreDefaults));
     setDisk(detail.diskHuman ?? "0 B");
     setQa(qaRes.reports ?? []);
     setHasLoaded(true);
@@ -125,7 +135,42 @@ export default function ProjectWorkspace(props: {
         </div>
         <div className="flex gap-4 text-xs text-neutral-500">
           <span>status: {props.status}</span>
-          <span>spend: ${spend.toFixed(2)}</span>
+          <span className="relative">
+            <button
+              onClick={() => setSpendOpen((v) => !v)}
+              className="underline transition-opacity active:opacity-60"
+              title="Break down by provider and operation"
+            >
+              spend: ${spend.toFixed(2)}
+            </button>
+            {spendOpen && (
+              <div className="absolute right-0 top-6 z-10 w-80 rounded-lg border border-neutral-300 bg-white p-3 text-left shadow-lg">
+                <table className="w-full text-xs">
+                  <tbody>
+                    {spendRows.length === 0 && (
+                      <tr>
+                        <td className="py-1 text-neutral-400">Nothing spent yet.</td>
+                      </tr>
+                    )}
+                    {spendRows.map((r) => (
+                      <tr key={`${r.provider}:${r.operation}`}>
+                        <td className="py-0.5 pr-2">{r.operation}</td>
+                        <td className="py-0.5 pr-2 text-neutral-400">x{r.calls}</td>
+                        <td className="py-0.5 text-right tabular-nums">${r.usd.toFixed(3)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {ratesAreDefaults && (
+                  <p className="mt-2 border-t border-neutral-200 pt-2 text-xs text-amber-700">
+                    Gemini image and agent costs are <strong>estimates</strong> at built-in default rates. Token
+                    counts are real; set GEMINI_IMAGE_USD, GEMINI_INPUT_USD_PER_M and GEMINI_OUTPUT_USD_PER_M to
+                    your account&apos;s actual prices for exact figures.
+                  </p>
+                )}
+              </div>
+            )}
+          </span>
           <span>
             disk: {disk}{" "}
             <button
@@ -254,6 +299,7 @@ export default function ProjectWorkspace(props: {
                         )}
                       </p>
                       <Verdict report={report} />
+                      <AppliedFixes artifact={sheet} />
                       <div className="flex flex-wrap gap-2">
                         {/* Same single-scene job either way — the label just reflects
                             whether there is already a sheet to replace. */}
@@ -309,6 +355,7 @@ export default function ProjectWorkspace(props: {
                     )}
                     <div className="mt-2 space-y-2">
                       <Verdict report={report} />
+                      <AppliedFixes artifact={clip} />
                       {/* Gated on this scene's own storyboard approval, so a single
                           paid render cannot bypass the check that "Generate approved
                           scenes" enforces in bulk. */}
@@ -399,7 +446,44 @@ function Verdict({ report }: { report?: CriticReport }) {
           ))}
         </details>
       )}
+      {report.verdict !== "PASS" && (
+        <p className="text-xs text-neutral-500">
+          {report.verdict === "FAIL"
+            ? "Re-roll to retry with these defects fed back into the prompt, or approve anyway if it looks fine to you."
+            : report.verdict === "UNAVAILABLE"
+              ? "No automated check ran on this one — judge it yourself, then approve or re-roll."
+              : "The two QA passes disagreed, so nothing is confirmed — look at the image yourself. Re-roll feeds the notes back in; approve if it reads fine."}
+        </p>
+      )}
     </div>
+  );
+}
+
+/**
+ * The constraints the repair agent added to get this artifact. Shown because an
+ * auto-repair that silently rewrites the prompt is a black box — and because these
+ * carry forward into the next re-roll, so it matters that they are visible.
+ */
+function AppliedFixes({ artifact }: { artifact?: Artifact }) {
+  if (!artifact?.prompt_additions) return null;
+  let fixes: string[] = [];
+  try {
+    const parsed = JSON.parse(artifact.prompt_additions);
+    if (Array.isArray(parsed)) fixes = parsed as string[];
+  } catch {
+    return null;
+  }
+  if (!fixes.length) return null;
+
+  return (
+    <details className="text-xs text-neutral-500">
+      <summary className="cursor-pointer">{fixes.length} fix(es) applied by the QA agent</summary>
+      {fixes.map((f, i) => (
+        <p key={i} className="ml-3 mt-1 text-neutral-600">
+          + {f}
+        </p>
+      ))}
+    </details>
   );
 }
 

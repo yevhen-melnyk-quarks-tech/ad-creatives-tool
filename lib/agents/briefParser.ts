@@ -2,6 +2,7 @@ import { generateStructured, TEXT_MODEL } from "../models/gemini";
 import { estimateSceneDuration } from "../pipeline/timing";
 import { normalizeScenario } from "../pipeline/normalize";
 import { ScenarioSchema, type Scenario, type Character, type Frame } from "../pipeline/types";
+import { estimateGeminiUsd, type Usage } from "../models/pricing";
 
 /**
  * Turns a raw creative brief — pasted straight from a Notion task, in whatever
@@ -128,23 +129,29 @@ function buildPrompt(rawText: string): string {
   ].join("\n");
 }
 
-export type BriefParseResult = { scenario: Scenario; warnings: string[] };
+export type BriefParseResult = { scenario: Scenario; warnings: string[]; usd: number };
 
 export async function parseBrief(rawText: string, onLog?: (m: string) => void): Promise<BriefParseResult> {
   if (!rawText.trim()) throw new Error("Brief text is empty");
 
+  // Parsing runs in an API route rather than the worker, so it is outside the ambient
+  // usage sink and reports its own cost back to the caller to record.
+  let usage: Usage = { promptTokens: 0, outputTokens: 0, images: 0 };
+
   const raw = await generateStructured<RawBrief>({
     prompt: buildPrompt(rawText),
     schema: BRIEF_SCHEMA as unknown as Record<string, unknown>,
+    label: "brief-parse",
     model: TEXT_MODEL,
     onLog,
+    onUsage: (u) => { usage = u; },
   });
 
-  return hydrate(raw);
+  return { ...hydrate(raw), usd: estimateGeminiUsd(usage) };
 }
 
 /** Turns the LLM's loosely-typed output into a Scenario that matches the pipeline's schema exactly. */
-function hydrate(raw: RawBrief): BriefParseResult {
+function hydrate(raw: RawBrief): Omit<BriefParseResult, "usd"> {
   const warnings: string[] = [];
   const orNull = (s: string) => (s.trim() ? s : null);
 

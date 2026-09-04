@@ -105,9 +105,42 @@ constraint, the loop stops rather than paying for the same dice roll again.
 
 ## Cost control
 
-Every billable call is written to `costs`. Video re-rolls check
-`PROJECT_BUDGET_USD` before each attempt and stop at the ceiling. Defaults:
-`MAX_ATTEMPTS_IMAGE=3`, `MAX_ATTEMPTS_VIDEO=2`, `PROJECT_BUDGET_USD=25`.
+Every billable call is written to `costs` — Seedance video, Whisper, image
+generation, and every agent call (critics, repair planner, brief parser). The
+project header breaks the total down by operation.
+
+Video re-rolls check `PROJECT_BUDGET_USD` before each attempt and stop at the
+ceiling. Defaults: `MAX_ATTEMPTS_IMAGE=3`, `MAX_ATTEMPTS_VIDEO=2`,
+`PROJECT_BUDGET_USD=25`.
+
+Gemini usage is **measured** (token counts come from the API, images are counted)
+but priced at **configurable rates**, since published prices move and vary by
+model. Until you set them the UI labels these figures as estimates:
+
+```
+GEMINI_IMAGE_USD=0.04            # per generated image
+GEMINI_INPUT_USD_PER_M=2.0       # per 1M input tokens
+GEMINI_OUTPUT_USD_PER_M=12.0     # per 1M output tokens
+```
+
+## What a REVIEW or FAIL means, and what a re-roll does
+
+A re-roll is not a reshuffle. Each run is a bounded
+`generate → critique → repair → regenerate` loop: on a failure the repair agent
+reads the critic's findings and appends concrete constraints, then regenerates.
+Those constraints are **persisted on the artifact and carried into the next
+re-roll**, so a second re-roll starts from the fixes the first one worked out
+instead of rediscovering them. The UI shows what was applied.
+
+- **FAIL** — a defect both QA passes agreed on. Re-roll retries with it fed back in.
+- **REVIEW** — the passes disagreed, so nothing is confirmed. Storyboards still
+  attempt one repair (cheap); video does not, because spending on an
+  uncorroborated finding is spending on noise.
+- **UNAVAILABLE** — no check ran at all. This is distinct from a REVIEW, and it
+  happens reliably when a scene's cast includes a child: the character
+  description plus a request to verify appearance against the images trips a
+  non-configurable safety filter that relaxed `safetySettings` do not cover.
+  Those sheets need a human eye; the tool says so rather than implying a verdict.
 
 ## Layout
 

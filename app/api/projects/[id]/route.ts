@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
-import { db, projectSpendUsd } from "@/lib/db";
+import { db, projectSpendUsd, recordCost } from "@/lib/db";
 import { projectDir, dirSizeBytes, humanBytes, pruneIntermediates } from "@/lib/paths";
 import { ScenarioSchema } from "@/lib/pipeline/types";
 import { normalizeScenario } from "@/lib/pipeline/normalize";
 import { parseBrief } from "@/lib/agents/briefParser";
+import { RATES_ARE_DEFAULTS } from "@/lib/models/pricing";
 
 export const dynamic = "force-dynamic";
 
@@ -17,7 +18,7 @@ export async function GET(_req: Request, { params }: Ctx) {
   if (!project) return NextResponse.json({ error: "not found" }, { status: 404 });
 
   const artifacts = db()
-    .prepare(`SELECT kind, scene_id, file_path, attempt, approved FROM artifacts WHERE project_id = ?`)
+    .prepare(`SELECT kind, scene_id, file_path, attempt, approved, prompt_additions FROM artifacts WHERE project_id = ?`)
     .all(id);
   const jobs = db()
     .prepare(`SELECT id, kind, status, error, created_at, finished_at FROM jobs WHERE project_id = ? ORDER BY created_at DESC LIMIT 20`)
@@ -27,11 +28,23 @@ export async function GET(_req: Request, { params }: Ctx) {
   // work-in-progress files and control over how large the folder gets.
   const bytes = await dirSizeBytes(projectDir(id));
 
+  // Broken out by provider+operation so the number is inspectable rather than one
+  // opaque total — image generation and agent calls used to be missing entirely.
+  const spendBreakdown = db()
+    .prepare(
+      `SELECT provider, operation, COUNT(*) AS calls, SUM(usd) AS usd
+       FROM costs WHERE project_id = ?
+       GROUP BY provider, operation ORDER BY usd DESC`
+    )
+    .all(id);
+
   return NextResponse.json({
     project,
     artifacts,
     jobs,
     spendUsd: projectSpendUsd(id),
+    spendBreakdown,
+    spendRatesAreDefaults: RATES_ARE_DEFAULTS,
     diskBytes: bytes,
     diskHuman: humanBytes(bytes),
   });
@@ -73,6 +86,9 @@ export async function PATCH(req: Request, { params }: Ctx) {
     try {
       const result = await parseBrief(body.brief);
       warnings = result.warnings;
+      if (result.usd > 0) {
+        recordCost({ projectId: id, provider: "gemini", operation: "brief-parse", usd: result.usd });
+      }
       db()
         .prepare(`UPDATE projects SET brief=?, scenario_json=?, updated_at=datetime('now') WHERE id=?`)
         .run(body.brief, JSON.stringify(result.scenario), id);

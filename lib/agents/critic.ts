@@ -60,6 +60,7 @@ export async function runCritic(opts: {
           prompt: opts.prompt,
           imagePaths: opts.imagePaths,
           schema: CRITIC_SCHEMA as unknown as Record<string, unknown>,
+          label: `critic:${opts.stage}`,
           onLog: opts.onLog,
         })
       );
@@ -70,11 +71,19 @@ export async function runCritic(opts: {
   }
 
   if (results.length === 0) {
+    // A safety block is not a quality verdict. It happens reliably when a scene's
+    // cast includes a child: the character description plus a request to verify
+    // appearance against the images trips a non-configurable content filter, which
+    // relaxed safetySettings do not cover. Say so plainly instead of implying the
+    // sheet was assessed.
+    const blocked = /PROHIBITED_CONTENT|blocked/i.test(lastError ?? "");
     const report: CriticReport = {
       stage: opts.stage,
       sceneId: opts.sceneId,
-      verdict: "REVIEW",
-      summary: `Critic could not run: ${lastError ?? "unknown error"}`,
+      verdict: "UNAVAILABLE",
+      summary: blocked
+        ? "Automated QA could not run on this one — the vision model's safety filter refused to analyse it, which happens when a scene's cast includes a child. Review it yourself before approving."
+        : `Automated QA could not run: ${lastError ?? "unknown error"}`,
       findings: [],
       error: lastError,
     };

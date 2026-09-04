@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { db, uid } from "@/lib/db";
+import { db, uid, recordCost } from "@/lib/db";
 import { ensureProjectDirs } from "@/lib/paths";
 import { ScenarioSchema } from "@/lib/pipeline/types";
 import { normalizeScenario } from "@/lib/pipeline/normalize";
@@ -31,6 +31,7 @@ export async function POST(req: Request) {
   // (an empty draft to fill in later).
   let scenarioJson: string | null = null;
   let warnings: string[] = [];
+  let parseUsd = 0;
 
   if (body.scenario) {
     const parsed = ScenarioSchema.safeParse(body.scenario);
@@ -50,6 +51,7 @@ export async function POST(req: Request) {
       const result = await parseBrief(body.brief);
       scenarioJson = JSON.stringify(result.scenario);
       warnings = result.warnings;
+      parseUsd = result.usd;
     } catch (err) {
       return NextResponse.json({ error: `Could not parse brief: ${(err as Error).message}` }, { status: 422 });
     }
@@ -60,6 +62,10 @@ export async function POST(req: Request) {
     .prepare(`INSERT INTO projects (id, title, brief, scenario_json) VALUES (?, ?, ?, ?)`)
     .run(id, body.title.trim(), body.brief ?? "", scenarioJson);
   await ensureProjectDirs(id);
+  // Recorded after the insert, since the ledger has a foreign key to the project.
+  if (parseUsd > 0) {
+    recordCost({ projectId: id, provider: "gemini", operation: "brief-parse", usd: parseUsd });
+  }
   ensureWorker();
 
   return NextResponse.json({ id, warnings }, { status: 201 });
