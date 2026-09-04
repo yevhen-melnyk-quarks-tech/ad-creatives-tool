@@ -9,6 +9,7 @@ type Artifact = {
   prompt_additions: string | null;
 };
 type SpendRow = { provider: string; operation: string; calls: number; usd: number };
+type Note = { kind: string; scene_id: string | null; note: string };
 type Job = { id: string; kind: string; status: string; error: string | null; progress: string | null };
 type QaRow = { stage: string; scene_id: string | null; verdict: string; report: CriticReport };
 
@@ -35,6 +36,7 @@ export default function ProjectWorkspace(props: {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [qa, setQa] = useState<QaRow[]>([]);
+  const [notes, setNotes] = useState<Note[]>([]);
   const [spend, setSpend] = useState(props.initialSpendUsd);
   const [spendRows, setSpendRows] = useState<SpendRow[]>([]);
   const [spendOpen, setSpendOpen] = useState(false);
@@ -61,6 +63,7 @@ export default function ProjectWorkspace(props: {
     setRatesAreDefaults(Boolean(detail.spendRatesAreDefaults));
     setDisk(detail.diskHuman ?? "0 B");
     setQa(qaRes.reports ?? []);
+    setNotes(detail.notes ?? []);
     setHasLoaded(true);
   }, [projectId]);
 
@@ -71,15 +74,24 @@ export default function ProjectWorkspace(props: {
     return () => clearInterval(t);
   }, [refresh]);
 
-  async function startJob(kind: string, sceneId?: string) {
+  async function startJob(kind: string, sceneId?: string, note?: string) {
     setBusy(sceneId ? `${kind}:${sceneId}` : kind);
     await fetch(`/api/projects/${projectId}/jobs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind, sceneId }),
+      body: JSON.stringify({ kind, sceneId, note }),
     });
     await refresh();
     setBusy(null);
+  }
+
+  async function saveNote(kind: string, sceneId: string | null, note: string) {
+    await fetch(`/api/projects/${projectId}/notes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, sceneId, note }),
+    });
+    await refresh();
   }
 
   async function approve(kind: string, sceneId: string | null, approved: boolean) {
@@ -118,6 +130,8 @@ export default function ProjectWorkspace(props: {
     artifacts.find((a) => a.kind === kind && a.scene_id === sceneId);
   const qaFor = (stage: string, sceneId: string | null = null) =>
     qa.find((r) => r.stage === stage && r.scene_id === sceneId);
+  const noteFor = (kind: string, sceneId: string | null = null) =>
+    notes.find((n) => n.kind === kind && n.scene_id === sceneId)?.note ?? "";
 
   const activeJob = jobs.find((j) => j.status === "running" || j.status === "queued");
   const card = find("character_card");
@@ -267,6 +281,13 @@ export default function ProjectWorkspace(props: {
                     </Btn>
                   )}
                 </div>
+                <NoteBox
+                  initial={noteFor("character_card", null)}
+                  label={card ? "Re-roll with note" : "Generate with note"}
+                  busy={busy === "character_card"}
+                  onRun={(note) => startJob("character_card", undefined, note)}
+                  onClear={() => saveNote("character_card", null, "")}
+                />
               </div>
             </div>
           </Step>
@@ -300,6 +321,14 @@ export default function ProjectWorkspace(props: {
                       </p>
                       <Verdict report={report} />
                       <AppliedFixes artifact={sheet} />
+                      <NoteBox
+                        initial={noteFor("storyboard", scene.id)}
+                        label={sheet ? "Re-roll with note" : "Generate with note"}
+                        busy={busy === `storyboard_one:${scene.id}`}
+                        disabled={!cardApproved}
+                        onRun={(note) => startJob("storyboard_one", scene.id, note)}
+                        onClear={() => saveNote("storyboard", scene.id, "")}
+                      />
                       <div className="flex flex-wrap gap-2">
                         {/* Same single-scene job either way — the label just reflects
                             whether there is already a sheet to replace. */}
@@ -367,6 +396,15 @@ export default function ProjectWorkspace(props: {
                       >
                         {clip ? "Re-roll" : "Generate"}
                       </Btn>
+                      {sheetApproved && (
+                        <NoteBox
+                          initial={noteFor("video", scene.id)}
+                          label={clip ? "Re-roll with note" : "Generate with note"}
+                          busy={busy === `video_one:${scene.id}`}
+                          onRun={(note) => startJob("video_one", scene.id, note)}
+                          onClear={() => saveNote("video", scene.id, "")}
+                        />
+                      )}
                       {!sheetApproved && (
                         <p className="text-xs text-neutral-400">Approve this storyboard first.</p>
                       )}
@@ -397,6 +435,78 @@ export default function ProjectWorkspace(props: {
         </div>
       )}
     </main>
+  );
+}
+
+/**
+ * Free-text correction for one artifact, applied to the prompt on the next generation.
+ *
+ * Local draft state with a save-on-run button rather than autosave: the note is a
+ * deliberate instruction, and firing a paid regeneration off a half-typed sentence
+ * would be worse than making the user press a button.
+ */
+function NoteBox({
+  initial,
+  label,
+  busy,
+  disabled,
+  onRun,
+  onClear,
+}: {
+  initial: string;
+  label: string;
+  busy: boolean;
+  disabled?: boolean;
+  onRun: (note: string) => void;
+  onClear: () => void;
+}) {
+  const [open, setOpen] = useState(Boolean(initial));
+  const [text, setText] = useState(initial);
+
+  // Adopt a note saved elsewhere (or cleared by a re-parse) unless the user is
+  // mid-edit, so the box does not fight the polling refresh.
+  useEffect(() => {
+    setText((cur) => (cur === "" || cur === initial ? initial : cur));
+  }, [initial]);
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="text-xs text-neutral-500 underline transition-opacity active:opacity-60"
+      >
+        + add a note for the next attempt
+      </button>
+    );
+  }
+
+  return (
+    <div className="rounded border border-neutral-200 bg-neutral-50 p-2">
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={3}
+        placeholder={"What should change? e.g. \"Mia's hair should be a ponytail, not loose\" or \"remove the logo from the tablets\""}
+        className="w-full rounded border border-neutral-300 px-2 py-1 text-xs outline-none focus:border-neutral-900"
+      />
+      <div className="mt-1 flex items-center gap-2">
+        <Btn small onClick={() => onRun(text)} busy={busy} disabled={disabled || !text.trim()}>
+          {label}
+        </Btn>
+        {initial && (
+          <button
+            onClick={() => { setText(""); onClear(); }}
+            className="text-xs text-neutral-500 underline transition-opacity active:opacity-60"
+            title="Forget this note so it is not reapplied"
+          >
+            clear
+          </button>
+        )}
+        <span className="text-xs text-neutral-400">
+          {initial ? "a note is saved and will be reapplied" : "applied on the next attempt"}
+        </span>
+      </div>
+    </div>
   );
 }
 

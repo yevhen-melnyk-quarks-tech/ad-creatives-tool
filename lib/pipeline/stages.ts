@@ -1,9 +1,9 @@
 import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { artifact, ensureProjectDirs, safeSceneId } from "../paths";
-import { db, uid, recordCost, projectSpendUsd } from "../db";
+import { db, uid, recordCost, projectSpendUsd, getNote } from "../db";
 import { generateImage } from "../models/gemini";
-import { generateVideo, transcribe, uploadForTranscription, SEEDANCE_USD_PER_SEC } from "../models/replicate";
+import { generateVideo, transcribe, uploadForTranscription, SEEDANCE_USD_PER_SEC, SEEDANCE_PROMPT_LIMIT } from "../models/replicate";
 import { buildContactSheet, extractAudio, durationOf, exists } from "../media/ffmpeg";
 import { assembleFinal } from "../media/assemble";
 import { checkAssembly } from "../agents/assemblyCheck";
@@ -70,6 +70,50 @@ function saveAdditions(projectId: string, kind: string, sceneId: string | null, 
     .run(additions.length ? JSON.stringify(additions) : null, projectId, kind, sceneId);
 }
 
+/**
+ * Appends the operator's own correction to a prompt.
+ *
+ * Placed last and marked as overriding, because it is a human looking at the actual
+ * output and saying what is wrong — it should win over both the generic template and
+ * anything the repair agent inferred. This is the only feedback channel for scenes the
+ * QA critic cannot assess at all (any scene whose cast includes a child), so it has to
+ * work with no critic report present.
+ */
+function withOperatorNote(
+  basePrompt: string,
+  projectId: string,
+  kind: string,
+  sceneId: string | null,
+  log: Log,
+  maxChars?: number
+): string {
+  const note = getNote(projectId, kind, sceneId);
+  if (!note) return basePrompt;
+
+  const header =
+    "OPERATOR CORRECTIONS — CRITICAL, these come from a human reviewing the previous " +
+    "attempt and override any conflicting instruction above:\n";
+
+  let body = note;
+  if (maxChars) {
+    // The video model rejects prompts over a hard character limit, so a long note
+    // would otherwise fail the whole run. Trim it, but say so loudly rather than
+    // quietly dropping half of what the operator asked for.
+    const room = maxChars - basePrompt.length - header.length - 2;
+    if (room <= 0) {
+      log(`  WARNING: no room left in the video prompt for your note — it was NOT applied. Shorten the scene's dialogue or action text.`);
+      return basePrompt;
+    }
+    if (body.length > room) {
+      log(`  WARNING: your note is ${body.length} chars but only ${room} fit in the video prompt — it was trimmed. Shorten it to be sure nothing is lost.`);
+      body = body.slice(0, room);
+    }
+  }
+
+  log(`  applying your note: ${body.slice(0, 120)}${body.length > 120 ? "…" : ""}`);
+  return `${basePrompt}\n\n${header}${body}`;
+}
+
 export async function runCharacterCard(opts: {
   projectId: string;
   scenario: Scenario;
@@ -77,7 +121,10 @@ export async function runCharacterCard(opts: {
 }): Promise<{ report: CriticReport; accepted: boolean; path: string }> {
   await ensureProjectDirs(opts.projectId);
   const outPath = artifact.characterCard(opts.projectId);
-  const basePrompt = generateCharacterCardPrompt(opts.scenario.characters);
+  const basePrompt = withOperatorNote(
+    generateCharacterCardPrompt(opts.scenario.characters),
+    opts.projectId, "character_card", null, opts.log
+  );
 
   const outcome = await repairLoop<string>({
     stage: "character card",
@@ -117,7 +164,10 @@ export async function runStoryboard(opts: {
   if (!(await exists(cardPath))) throw new Error("Character card must exist and be approved before storyboards");
 
   const outPath = artifact.storyboard(opts.projectId, opts.scene.id);
-  const basePrompt = generateStoryboardPrompt(opts.scene, opts.scenario.characters);
+  const basePrompt = withOperatorNote(
+    generateStoryboardPrompt(opts.scene, opts.scenario.characters),
+    opts.projectId, "storyboard", opts.scene.id, opts.log
+  );
 
   const outcome = await repairLoop<string>({
     stage: "storyboard",
@@ -175,7 +225,10 @@ export async function runSceneVideo(opts: {
   }
 
   const outPath = artifact.video(opts.projectId, opts.scene.id);
-  const basePrompt = generateSeedanceVideoPrompt(opts.scene, opts.scenario.characters);
+  const basePrompt = withOperatorNote(
+    generateSeedanceVideoPrompt(opts.scene, opts.scenario.characters),
+    opts.projectId, "video", opts.scene.id, opts.log, SEEDANCE_PROMPT_LIMIT
+  );
   const costPerAttempt = opts.scene.durationSeconds * SEEDANCE_USD_PER_SEC;
 
   const outcome = await repairLoop<string>({

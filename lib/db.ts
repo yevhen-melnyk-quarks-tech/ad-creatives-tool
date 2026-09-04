@@ -86,6 +86,19 @@ function migrate(d: Database.Database) {
       created_at  TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- Free-text corrections typed by the operator, fed into the prompt on the next
+    -- generation. Kept in its own table rather than on the artifacts row so a note
+    -- can be written before an artifact exists, and so it survives the artifact
+    -- being replaced by a re-roll.
+    CREATE TABLE IF NOT EXISTS artifact_notes (
+      project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      kind        TEXT NOT NULL,
+      scene_id    TEXT,
+      note        TEXT NOT NULL,
+      updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (project_id, kind, scene_id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_jobs_status    ON jobs(status, created_at);
     CREATE INDEX IF NOT EXISTS idx_qa_project     ON qa_runs(project_id, stage);
     CREATE INDEX IF NOT EXISTS idx_costs_project  ON costs(project_id);
@@ -131,3 +144,31 @@ export function recordCost(row: {
 
 export const projectSpendUsd = (projectId: string): number =>
   (db().prepare(`SELECT COALESCE(SUM(usd), 0) AS t FROM costs WHERE project_id = ?`).get(projectId) as { t: number }).t;
+
+/** Operator correction for one artifact, or null. */
+export function getNote(projectId: string, kind: string, sceneId: string | null): string | null {
+  const row = db()
+    .prepare(`SELECT note FROM artifact_notes WHERE project_id=? AND kind=? AND scene_id IS ?`)
+    .get(projectId, kind, sceneId) as { note: string } | undefined;
+  return row?.note?.trim() ? row.note : null;
+}
+
+export function setNote(projectId: string, kind: string, sceneId: string | null, note: string) {
+  if (!note.trim()) {
+    db()
+      .prepare(`DELETE FROM artifact_notes WHERE project_id=? AND kind=? AND scene_id IS ?`)
+      .run(projectId, kind, sceneId);
+    return;
+  }
+  db()
+    .prepare(
+      `INSERT INTO artifact_notes (project_id, kind, scene_id, note) VALUES (?, ?, ?, ?)
+       ON CONFLICT(project_id, kind, scene_id) DO UPDATE SET note=excluded.note, updated_at=datetime('now')`
+    )
+    .run(projectId, kind, sceneId, note.trim());
+}
+
+export const listNotes = (projectId: string) =>
+  db()
+    .prepare(`SELECT kind, scene_id, note FROM artifact_notes WHERE project_id=?`)
+    .all(projectId) as { kind: string; scene_id: string | null; note: string }[];

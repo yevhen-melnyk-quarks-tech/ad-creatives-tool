@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { db, projectSpendUsd, recordCost } from "@/lib/db";
+import { db, projectSpendUsd, recordCost, listNotes } from "@/lib/db";
 import { projectDir, dirSizeBytes, humanBytes, pruneIntermediates } from "@/lib/paths";
 import { ScenarioSchema } from "@/lib/pipeline/types";
 import { normalizeScenario } from "@/lib/pipeline/normalize";
@@ -44,6 +44,7 @@ export async function GET(_req: Request, { params }: Ctx) {
     jobs,
     spendUsd: projectSpendUsd(id),
     spendBreakdown,
+    notes: listNotes(id),
     spendRatesAreDefaults: RATES_ARE_DEFAULTS,
     diskBytes: bytes,
     diskHuman: humanBytes(bytes),
@@ -93,6 +94,9 @@ export async function PATCH(req: Request, { params }: Ctx) {
         .prepare(`UPDATE projects SET brief=?, scenario_json=?, updated_at=datetime('now') WHERE id=?`)
         .run(body.brief, JSON.stringify(result.scenario), id);
       db().prepare(`DELETE FROM artifacts WHERE project_id=?`).run(id);
+      // Notes are written against specific scenes; a re-parse can renumber or merge
+      // them, so a stale note would attach to the wrong shot.
+      db().prepare(`DELETE FROM artifact_notes WHERE project_id=?`).run(id);
     } catch (err) {
       return NextResponse.json({ error: `Could not parse brief: ${(err as Error).message}` }, { status: 422 });
     }

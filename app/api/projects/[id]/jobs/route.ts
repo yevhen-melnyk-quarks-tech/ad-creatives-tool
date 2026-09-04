@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { db } from "@/lib/db";
+import { db, setNote } from "@/lib/db";
 import { enqueue, type JobKind } from "@/lib/jobs/worker";
 
 export const dynamic = "force-dynamic";
@@ -26,12 +26,28 @@ export async function GET(req: Request, { params }: Ctx) {
 
 export async function POST(req: Request, { params }: Ctx) {
   const { id } = await params;
-  const body = (await req.json().catch(() => null)) as { kind?: JobKind; sceneId?: string } | null;
+  const body = (await req.json().catch(() => null)) as
+    | { kind?: JobKind; sceneId?: string; note?: string }
+    | null;
   if (!body?.kind || !KINDS.includes(body.kind)) {
     return NextResponse.json({ error: `kind must be one of ${KINDS.join(", ")}` }, { status: 400 });
   }
   if ((body.kind === "storyboard_one" || body.kind === "video_one") && !body.sceneId) {
     return NextResponse.json({ error: "sceneId is required for single-scene jobs" }, { status: 400 });
+  }
+
+  // A note sent with the job is saved before it is queued, so "re-roll with this
+  // note" is one action for the user instead of save-then-run.
+  if (typeof body.note === "string") {
+    const kindForNote =
+      body.kind === "storyboard_one" || body.kind === "storyboards"
+        ? "storyboard"
+        : body.kind === "video_one" || body.kind === "videos"
+          ? "video"
+          : body.kind === "character_card"
+            ? "character_card"
+            : null;
+    if (kindForNote) setNote(id, kindForNote, body.sceneId ?? null, body.note);
   }
 
   // One running job at a time keeps ffmpeg and the model APIs from contending, and

@@ -142,6 +142,18 @@ instead of rediscovering them. The UI shows what was applied.
   non-configurable safety filter that relaxed `safetySettings` do not cover.
   Those sheets need a human eye; the tool says so rather than implying a verdict.
 
+### Telling it what to fix yourself
+
+Every artifact has a note box: type what is wrong in plain language and press
+"Re-roll with note". The text is appended to the prompt as an OPERATOR CORRECTIONS
+block marked as overriding both the template and anything the repair agent
+inferred, because it comes from a human looking at the actual output.
+
+Notes persist and are reapplied on later attempts until cleared, and they work
+with no critic report at all — which is the point, since they are the only
+feedback channel for scenes QA cannot assess. On a video the note is capped to fit
+the model's 4000-character prompt limit and the run log says so if it had to trim.
+
 ## Layout
 
 ```
@@ -165,8 +177,6 @@ app/             UI + API routes
   narrative effect. A single dialogue line too long for one clip cannot be split at
   all — that is reported as a warning rather than silently sped up, since the SOP rule
   is that dialogue is never shortened automatically.
-- The prompt-edit path the brief describes ("approve or edit with a prompt") is
-  currently re-roll-only; per-artifact manual prompt overrides are not wired up.
 - Video generation is 720p from the model and upscaled at assembly; only the overlays
   are natively 1080p.
 - No auth. It is an internal tool and assumes a trusted network.
