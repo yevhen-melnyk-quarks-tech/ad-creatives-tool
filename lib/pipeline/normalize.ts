@@ -1,4 +1,4 @@
-import { splitSceneIntoUnits, MAX_UNIT_SECONDS } from "./timing";
+import { splitSceneIntoUnits, pacingOverrideFor, MAX_UNIT_SECONDS } from "./timing";
 import type { Scenario } from "./types";
 
 /**
@@ -25,8 +25,19 @@ export function normalizeScenario(scenario: Scenario): { scenario: Scenario; war
         `Scene ${scene.id} "${scene.title}" ran past the ${MAX_UNIT_SECONDS}s clip limit and was split into ${units.length} units (${units.map((u) => u.id).join(", ")}).`
       );
     }
-    scenes.push(...units);
+    // Applied after splitting, since a unit's words/sec depends on the duration it
+    // ended up with — and only where one is not already authored.
+    for (const unit of units) {
+      scenes.push(
+        unit.pacingOverride
+          ? unit
+          : { ...unit, pacingOverride: pacingOverrideFor(unit.frames, unit.durationSeconds) }
+      );
+    }
   }
+
+  const dense = scenes.filter((s) => s.pacingOverride).length;
+  if (dense) warnings.push(`${dense} scene(s) have dense dialogue and were given a brisk-delivery pacing directive.`);
 
   return { scenario: { ...scenario, scenes }, warnings };
 }

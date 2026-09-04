@@ -50,7 +50,21 @@ const BRIEF_SCHEMA = {
           // output does not support a nullable keyword the way OpenAPI does, so an
           // empty-string sentinel is resolved back to null during hydration below.
           backgroundCustomers: { type: "string" },
+          // Locks what a screen in shot may show. Empty string when the scene has no
+          // phone/laptop/terminal visible.
+          screenLock: { type: "string" },
           charactersInSceneNames: { type: "array", items: { type: "string" } },
+          // Per-character voice performance direction. The video model uses these to
+          // cast and perform the dialogue; the manual pipeline set them on 14 of 15
+          // scenes and without them voices are arbitrary and drift between scenes.
+          voiceDirections: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: { characterName: { type: "string" }, direction: { type: "string" } },
+              required: ["characterName", "direction"],
+            },
+          },
           frames: {
             type: "array",
             items: {
@@ -67,7 +81,10 @@ const BRIEF_SCHEMA = {
             },
           },
         },
-        required: ["title", "location", "backgroundCustomers", "charactersInSceneNames", "frames"],
+        required: [
+          "title", "location", "backgroundCustomers", "screenLock",
+          "charactersInSceneNames", "voiceDirections", "frames",
+        ],
       },
     },
   },
@@ -87,7 +104,9 @@ type RawScene = {
   title: string;
   location: string;
   backgroundCustomers: string;
+  screenLock: string;
   charactersInSceneNames: string[];
+  voiceDirections: { characterName: string; direction: string }[];
   frames: RawFrame[];
 };
 type RawBrief = { title: string; characters: RawCharacter[]; scenes: RawScene[] };
@@ -126,6 +145,10 @@ function buildPrompt(rawText: string): string {
     "- `charactersInSceneNames` lists every character who speaks OR is clearly present in the scene's action text, using the exact name string from the `characters` list.",
     "- `backgroundCustomers`: only for scripted background people the scene explicitly calls for (e.g. a cashier, a crowd) — empty string if none, never invent one.",
     "- `noDialogueSound`: a short ambient sound description for a frame with no dialogue (e.g. 'quiet kitchen ambience'), empty string if not applicable.",
+    "",
+    "VOICE DIRECTIONS — one entry for every character who speaks in the scene. Describe the voice and the performance in a single phrase the way a casting note would: accent, register, age of voice, and the emotional delivery this particular scene needs. For example: 'neutral American accent, warm tired male delivery, gentle and quiet, a soft promise he is not sure he can keep' or 'neutral American accent, small bright curious child's voice, innocent and hopeful, slightly high and eager'. Keep a character's accent and vocal age identical in every scene so the same person is recognisable throughout the ad, and vary only the emotional delivery to match the moment.",
+    "",
+    "SCREEN LOCK — set this ONLY when a phone, laptop, tablet, card terminal or other screen is visible in the scene. Write a directive keeping its content non-legible, since generated screen text comes out garbled: e.g. 'SCREEN LOCK — CRITICAL: the phone display is never legible to the viewer. It is always angled away from camera. Never render any numbers, any interface text or any logo on the screen.' Empty string when no screen is in shot.",
   ].join("\n");
 }
 
@@ -240,11 +263,15 @@ function hydrate(raw: RawBrief): Omit<BriefParseResult, "usd"> {
       durationSeconds: estimateSceneDuration(frames),
       location: s.location.trim(),
       backgroundCustomers: orNull(s.backgroundCustomers ?? ""),
-      screenLock: null,
+      screenLock: orNull(s.screenLock ?? ""),
       charactersInScene,
       frames,
-      pacingOverride: null,
-      voiceDirections: {},
+      pacingOverride: null, // filled in below, from the measured words/sec
+      voiceDirections: Object.fromEntries(
+        (s.voiceDirections ?? [])
+          .map((v) => [resolveName(v.characterName)?.name ?? null, v.direction.trim()] as const)
+          .filter((e): e is readonly [string, string] => Boolean(e[0] && e[1]))
+      ),
     };
   });
 

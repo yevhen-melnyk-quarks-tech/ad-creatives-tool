@@ -43,9 +43,38 @@ export const probe = (file: string, entries: string): Promise<string> =>
 export const durationOf = async (file: string) => parseFloat(await probe(file, "format=duration"));
 
 /**
- * 4-up contact sheet of frames sampled through a clip, for the video-stage critic.
- * Samples at 12/37/62/87% rather than the exact ends, which are often a fade or a
- * motion-blurred first frame.
+ * Frames sampled through a clip at NATIVE resolution, for the video-stage critic.
+ *
+ * Replaces a 400px-wide 2x2 contact sheet. That downscale (from a 720px source) was
+ * actively causing false failures: at 400px a hand's curled fingers and a dark-clothed
+ * crossed leg are genuinely ambiguous, and the model resolved the ambiguity by
+ * asserting a defect — reporting "six digits" and "legs fused into a malformed mass"
+ * on a clip that is fine at full size. Sampling more frames also lets a finding be
+ * checked for persistence, which is what distinguishes a real defect from a
+ * single-frame artifact nobody perceives at 24fps.
+ */
+export async function extractFrames(clipPath: string, outDir: string, count = 6): Promise<string[]> {
+  const duration = await durationOf(clipPath);
+  await mkdir(outDir, { recursive: true });
+
+  // Evenly spaced, avoiding the exact ends which are often a fade or a
+  // motion-blurred first frame.
+  const paths: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const frac = 0.1 + (0.8 * i) / Math.max(1, count - 1);
+    const out = path.join(outDir, `f${i + 1}.png`);
+    await run(
+      ["-y", "-ss", (duration * frac).toFixed(2), "-i", clipPath, "-frames:v", "1", "-update", "1", out],
+      `frame ${i + 1}`
+    );
+    paths.push(out);
+  }
+  return paths;
+}
+
+/**
+ * 4-up contact sheet of frames sampled through a clip. Retained for diagnostics and
+ * for anything that wants a single browsable image; the critic uses extractFrames.
  */
 export async function buildContactSheet(clipPath: string, outPath: string): Promise<string> {
   const duration = await durationOf(clipPath);

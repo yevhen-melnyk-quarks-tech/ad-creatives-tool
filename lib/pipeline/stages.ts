@@ -4,7 +4,7 @@ import { artifact, ensureProjectDirs, safeSceneId } from "../paths";
 import { db, uid, recordCost, projectSpendUsd, getNote } from "../db";
 import { generateImage } from "../models/gemini";
 import { generateVideo, transcribe, uploadForTranscription, SEEDANCE_USD_PER_SEC, SEEDANCE_PROMPT_LIMIT } from "../models/replicate";
-import { buildContactSheet, extractAudio, durationOf, exists } from "../media/ffmpeg";
+import { buildContactSheet, extractFrames, extractAudio, durationOf, exists } from "../media/ffmpeg";
 import { assembleFinal } from "../media/assemble";
 import { checkAssembly } from "../agents/assemblyCheck";
 import { critiqueCharacterCard, critiqueStoryboard, critiqueVideoScene } from "../agents/critics";
@@ -23,6 +23,9 @@ type Log = (m: string) => void;
 const MAX_ATTEMPTS_IMAGE = Number(process.env.MAX_ATTEMPTS_IMAGE ?? 3);
 const MAX_ATTEMPTS_VIDEO = Number(process.env.MAX_ATTEMPTS_VIDEO ?? 2);
 const PROJECT_BUDGET_USD = Number(process.env.PROJECT_BUDGET_USD ?? 25);
+// Frames the video critic inspects. More frames make persistence judgeable (a defect
+// in one frame is an artifact, across several it is real) at a few cents per audit.
+const VIDEO_CRITIC_FRAMES = Number(process.env.VIDEO_CRITIC_FRAMES ?? 6);
 
 function upsertArtifact(row: {
   projectId: string;
@@ -277,14 +280,21 @@ export async function runSceneVideo(opts: {
         prompt,
         attempt,
       });
-      const sheet = await buildContactSheet(
+      const safe = safeSceneId(opts.scene.id);
+      // Native-resolution frames for the critic; the contact sheet is still written
+      // alongside so a human has one browsable image to glance at.
+      const frames = await extractFrames(
         outPath,
-        path.join(artifact.diag(opts.projectId), `vaudit_${safeSceneId(opts.scene.id)}.jpg`)
+        path.join(artifact.diag(opts.projectId), `frames_${safe}`),
+        VIDEO_CRITIC_FRAMES
+      );
+      await buildContactSheet(outPath, path.join(artifact.diag(opts.projectId), `vaudit_${safe}.jpg`)).catch(
+        () => undefined
       );
       return critiqueVideoScene({
         projectId: opts.projectId,
         cardPath,
-        contactSheetPath: sheet,
+        framePaths: frames,
         scene: opts.scene,
         attempt,
         samples: 2,

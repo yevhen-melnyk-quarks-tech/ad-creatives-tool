@@ -18,9 +18,10 @@ export const CRITIC_SCHEMA = {
           category: { type: "string" },
           subject: { type: "string" },
           panels: { type: "array", items: { type: "integer" } },
+          confidence: { type: "string", enum: ["high", "medium", "low"] },
           detail: { type: "string" },
         },
-        required: ["blocking", "category", "detail"],
+        required: ["blocking", "category", "detail", "panels", "confidence"],
       },
     },
   },
@@ -47,6 +48,12 @@ export async function runCritic(opts: {
   prompt: string;
   imagePaths: string[];
   samples?: number;
+  /**
+   * Applied to the merged report before it is persisted, so the stored audit trail is
+   * the same one the pipeline acted on. Used by the video critic to demote findings
+   * that do not persist across frames.
+   */
+  postProcess?: (report: CriticReport) => CriticReport;
   onLog?: (m: string) => void;
 }): Promise<CriticReport> {
   const samples = Math.max(1, opts.samples ?? 1);
@@ -91,7 +98,8 @@ export async function runCritic(opts: {
     return report;
   }
 
-  const report = reconcile(opts.stage, opts.sceneId, results);
+  const merged = reconcile(opts.stage, opts.sceneId, results);
+  const report = opts.postProcess ? opts.postProcess(merged) : merged;
   persist(opts.projectId, opts.attempt ?? 1, report);
   return report;
 }
@@ -125,8 +133,14 @@ function reconcile(stage: string, sceneId: string | undefined, results: RawCriti
       if (seen.has(key)) continue;
       seen.add(key);
       const entry = byKey.get(key);
-      if (entry) entry.votes++;
-      else byKey.set(key, { finding: { ...f }, votes: 1 });
+      if (entry) {
+        entry.votes++;
+        // Union the frames: one sample may notice the defect in frames the other
+        // missed, and persistence is judged on everything observed.
+        entry.finding.panels = [...new Set([...(entry.finding.panels ?? []), ...(f.panels ?? [])])].sort((a, b) => a - b);
+      } else {
+        byKey.set(key, { finding: { ...f, panels: [...(f.panels ?? [])] }, votes: 1 });
+      }
     }
   }
 

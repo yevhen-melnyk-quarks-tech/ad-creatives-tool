@@ -19,7 +19,13 @@ export type Finding = {
   blocking: boolean;
   category: string;
   subject?: string;   // character name, prop, panel — whatever the finding is about
+  /**
+   * Which panels/frames the defect is visible in. Load-bearing for video: a defect in
+   * one sampled frame is usually an artifact nobody perceives in motion, while one
+   * that persists across frames is real. Used to decide whether it blocks.
+   */
   panels?: number[];
+  confidence?: "high" | "medium" | "low";
   detail: string;
 };
 

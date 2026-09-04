@@ -173,3 +173,24 @@ export function splitSceneIntoUnits(scene: Scene): { units: Scene[]; warnings: s
 
   return { units, warnings };
 }
+
+/**
+ * The SOP's pacing directive, emitted only when a scene's dialogue is dense enough to
+ * need it.
+ *
+ * Ported from the manual pipeline, where one scene carried this by hand. Without it a
+ * dense scene comes back with stretched words and inserted pauses as the model pads
+ * the dialogue to fill the clip's duration.
+ */
+export function pacingOverrideFor(frames: Frame[], durationSeconds: number): string | null {
+  const words = frames.reduce((sum, f) => sum + (f.dialogue ? countWords(f.dialogue.line) : 0), 0);
+  if (!words || durationSeconds <= 0) return null;
+  const wordsPerSecond = words / durationSeconds;
+  if (wordsPerSecond < RATES.comfortable) return null;
+
+  return (
+    "PACING PRIORITY — CRITICAL: dialogue runs continuously. Delivery is brisk, fast and alive — " +
+    "do not stretch words, do not slow the speech down, do not insert pauses to fill time, no dead air " +
+    "between lines. Cut on the last word of each line straight into the next shot."
+  );
+}
