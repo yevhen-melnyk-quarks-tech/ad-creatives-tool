@@ -123,11 +123,27 @@ export function detectByName(text: string, sceneCharacters: Character[]): Charac
   for (const c of byLength) {
     if (tryMatch(c.name)) found.push(c);
   }
+  // Token fallback: a first name, or a role word like "boss". Possessives are stripped
+  // so "John's" and "John" are the same token.
+  //
+  // This deliberately errs towards matching too many rather than too few, and the
+  // asymmetry is the reason. A character MISSED here is left out of the cast, and the
+  // identity lock then states they do not appear while the action has them acting —
+  // the contradiction that produced a clip starring the wrong man and a sheet of a
+  // woman talking to nobody. A character matched in error only widens the cast, which
+  // makes the lock permissive. Requiring tokens to be unique within the cast was tried
+  // and rejected: with a "John's Boss" in the cast it made the bare name "John"
+  // ambiguous, so "John waits" stopped identifying John Carter — a regression in
+  // exactly the direction that does damage.
+  const bare = (t: string) => t.replace(/['’]s$|s['’]$/i, "").toLowerCase();
+
   for (const c of byLength) {
     if (found.some((f) => f.id === c.id)) continue;
-    // A first name, or a role word like "boss". Short tokens are skipped, since a
-    // two-letter fragment matches far too much prose.
-    const tokens = c.name.split(/\s+/).filter((t) => t.length > 2).sort((a, b) => b.length - a.length);
+    const tokens = c.name
+      .split(/\s+/)
+      .map(bare)
+      .filter((t) => t.length > 2)
+      .sort((a, b) => b.length - a.length);
     if (tokens.some(tryMatch)) found.push(c);
   }
 
