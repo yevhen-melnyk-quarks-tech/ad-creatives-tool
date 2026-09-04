@@ -123,6 +123,24 @@ which used to abort the whole batch and leave every later scene ungenerated.
 Each scene row shows a **generating** badge while it is being worked on, so progress
 is visible without scrolling back to the top of a long project.
 
+## Speed
+
+Bulk runs generate several scenes at once, bounded by `CONCURRENCY_IMAGE` (default 3)
+and `CONCURRENCY_VIDEO` (default 3). Critic samples for one audit also run together
+rather than in sequence. Measured:
+
+- 6 storyboards: **397s sequential -> 193s at 3 concurrent** (~2x; less than 3x
+  because a scene's repair attempts are inherently sequential)
+- 3 clips at 480p: **129s wall clock**, where one alone takes 109s — near-linear,
+  and Replicate accepts the concurrency rather than rejecting it
+
+Caps rather than unbounded fan-out: both providers rate-limit, and Replicate queues
+anything over its own per-account limit. Two things had to change for this to be
+safe — the job log now appends in a single SQL statement (a read-then-write silently
+dropped lines when two scenes logged at once), and the budget guard counts in-flight
+reservations, or concurrent clips would all pass the same stale check and overshoot
+the ceiling together.
+
 ## Render quality
 
 The video section has a **480p / 720p** selector, stored per project and defaulting

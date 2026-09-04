@@ -209,3 +209,30 @@ export function recoverOrphanedJobs(maxAttempts = 3): number {
     .run(maxAttempts, maxAttempts, maxAttempts);
   return res.changes;
 }
+
+/**
+ * Spend already committed but not yet recorded, held in memory for the life of a job.
+ *
+ * The budget guard reads the costs table, which is only written AFTER a generation
+ * returns. Sequentially that was fine. With several clips in flight at once, each one
+ * would see the same pre-flight total and they could collectively blow past the
+ * ceiling by the cost of every concurrent attempt. Reserving up front closes that.
+ *
+ * In-process state is sufficient because there is exactly one worker; a crash loses
+ * the reservations, which is correct — the generations died with it.
+ */
+const reserved = new Map<string, number>();
+
+export function reserveSpend(projectId: string, usd: number) {
+  reserved.set(projectId, (reserved.get(projectId) ?? 0) + usd);
+}
+
+export function releaseSpend(projectId: string, usd: number) {
+  const next = (reserved.get(projectId) ?? 0) - usd;
+  if (next > 0.0001) reserved.set(projectId, next);
+  else reserved.delete(projectId);
+}
+
+/** Recorded spend plus anything currently in flight. What the budget guard must use. */
+export const projectCommittedUsd = (projectId: string): number =>
+  projectSpendUsd(projectId) + (reserved.get(projectId) ?? 0);

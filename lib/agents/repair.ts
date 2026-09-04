@@ -1,5 +1,5 @@
 import { generateStructured, TEXT_MODEL } from "../models/gemini";
-import { projectSpendUsd } from "../db";
+import { projectCommittedUsd } from "../db";
 import type { CriticReport, RepairPlan } from "./types";
 import { blockingFindings } from "./types";
 
@@ -118,7 +118,9 @@ export async function repairLoop<T>(opts: {
 
   for (let attempt = 1; attempt <= opts.maxAttempts; attempt++) {
     if (opts.costPerAttemptUsd && opts.budgetUsd !== undefined) {
-      const spent = projectSpendUsd(opts.projectId);
+      // Committed, not just recorded: concurrent attempts must see each other's
+      // in-flight cost or they all pass the check and overshoot together.
+      const spent = projectCommittedUsd(opts.projectId);
       if (spent + opts.costPerAttemptUsd > opts.budgetUsd) {
         opts.onLog?.(
           `  budget guard: $${spent.toFixed(2)} spent, next attempt $${opts.costPerAttemptUsd.toFixed(2)} would exceed $${opts.budgetUsd.toFixed(2)} — stopping`

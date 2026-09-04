@@ -57,25 +57,28 @@ export async function runCritic(opts: {
   onLog?: (m: string) => void;
 }): Promise<CriticReport> {
   const samples = Math.max(1, opts.samples ?? 1);
-  const results: RawCritic[] = [];
   let lastError: string | undefined;
 
-  for (let i = 0; i < samples; i++) {
-    try {
-      results.push(
-        await generateStructured<RawCritic>({
-          prompt: opts.prompt,
-          imagePaths: opts.imagePaths,
-          schema: CRITIC_SCHEMA as unknown as Record<string, unknown>,
-          label: `critic:${opts.stage}`,
-          onLog: opts.onLog,
+  // Samples run together: they are independent reads of the same images, so doing
+  // them in sequence just doubled the wait on every audit.
+  const settled = await Promise.all(
+    Array.from({ length: samples }, (_, i) =>
+      generateStructured<RawCritic>({
+        prompt: opts.prompt,
+        imagePaths: opts.imagePaths,
+        schema: CRITIC_SCHEMA as unknown as Record<string, unknown>,
+        label: `critic:${opts.stage}`,
+        onLog: opts.onLog,
+      })
+        .then((value) => ({ ok: true as const, value }))
+        .catch((err: Error) => {
+          lastError = err.message;
+          opts.onLog?.(`  critic sample ${i + 1} failed: ${err.message}`);
+          return { ok: false as const };
         })
-      );
-    } catch (err) {
-      lastError = (err as Error).message;
-      opts.onLog?.(`  critic sample ${i + 1} failed: ${lastError}`);
-    }
-  }
+    )
+  );
+  const results: RawCritic[] = settled.flatMap((r) => (r.ok ? [r.value] : []));
 
   if (results.length === 0) {
     // A safety block is not a quality verdict. It happens reliably when a scene's

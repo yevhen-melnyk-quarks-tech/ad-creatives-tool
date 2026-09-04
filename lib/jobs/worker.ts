@@ -1,4 +1,5 @@
 import { db, uid, recordCost, recoverOrphanedJobs } from "../db";
+import { mapWithConcurrency } from "../util/concurrency";
 import { setUsageSink } from "../models/usageTracker";
 import { estimateGeminiUsd } from "../models/pricing";
 import { ScenarioSchema, type Scenario } from "../pipeline/types";
@@ -13,6 +14,13 @@ import { runCharacterCard, runStoryboard, runSceneVideo, runCaptions, runAssembl
  * full assembly several minutes) lives here rather than in a request handler, which
  * is precisely why this tool cannot be a set of serverless functions.
  */
+
+// Bounded concurrency for bulk runs. Sequential generation was the dominant cost of a
+// run: twenty clips at ~110s each is over half an hour of waiting. Both providers
+// rate-limit, so these are caps rather than "as many as there are scenes", and
+// Replicate queues anything over its own per-account limit rather than erroring.
+const CONCURRENCY_IMAGE = Number(process.env.CONCURRENCY_IMAGE ?? 3);
+const CONCURRENCY_VIDEO = Number(process.env.CONCURRENCY_VIDEO ?? 3);
 
 export type JobKind =
   | "character_card"
@@ -47,12 +55,22 @@ export function ensureWorker() {
   if (typeof timer.unref === "function") timer.unref();
 }
 
+/**
+ * Appends one line to a job's log in a single statement.
+ *
+ * Was a SELECT followed by an UPDATE, which silently drops lines the moment two
+ * scenes log concurrently — the second write overwrites whatever the first added.
+ * Concatenating in SQL keeps every line, and the length cap is applied in the same
+ * statement so the row still cannot grow without bound.
+ */
 function appendProgress(jobId: string, line: string) {
-  const row = db().prepare(`SELECT progress FROM jobs WHERE id = ?`).get(jobId) as { progress: string | null } | undefined;
-  const next = `${row?.progress ?? ""}${line}\n`;
-  // Cap the log so a pathological run cannot grow a row without bound.
-  const trimmed = next.length > 40_000 ? next.slice(-40_000) : next;
-  db().prepare(`UPDATE jobs SET progress = ? WHERE id = ?`).run(trimmed, jobId);
+  db()
+    .prepare(
+      `UPDATE jobs
+          SET progress = substr(COALESCE(progress, '') || ? || char(10), -40000)
+        WHERE id = ?`
+    )
+    .run(line, jobId);
 }
 
 async function tick() {
@@ -99,6 +117,7 @@ async function tick() {
       .prepare(`UPDATE jobs SET status='failed', error=?, finished_at=datetime('now') WHERE id = ?`)
       .run(msg, job.id);
   } finally {
+    activeScenes.delete(job.id);
     db().prepare(`UPDATE jobs SET active_scene = NULL WHERE id = ?`).run(job.id);
     setUsageSink(null);
     running = false;
@@ -113,8 +132,34 @@ function loadScenario(projectId: string): Scenario {
   return ScenarioSchema.parse(JSON.parse(row.scenario_json));
 }
 
-const setActiveScene = (jobId: string, sceneId: string | null) =>
-  db().prepare(`UPDATE jobs SET active_scene = ? WHERE id = ?`).run(sceneId, jobId);
+/**
+ * Tracks every scene currently being worked, not just one.
+ *
+ * Stored as a JSON array because parallel generation means several scenes are active
+ * simultaneously and the UI badges each of them. Kept in memory per job and flushed
+ * to the row, so a concurrent add and remove cannot clobber each other.
+ */
+const activeScenes = new Map<string, Set<string>>();
+
+function flushActive(jobId: string) {
+  const set = activeScenes.get(jobId);
+  const value = set && set.size ? JSON.stringify([...set]) : null;
+  db().prepare(`UPDATE jobs SET active_scene = ? WHERE id = ?`).run(value, jobId);
+}
+
+function markActive(jobId: string, sceneId: string) {
+  if (!activeScenes.has(jobId)) activeScenes.set(jobId, new Set());
+  activeScenes.get(jobId)!.add(sceneId);
+  flushActive(jobId);
+}
+
+function clearActive(jobId: string, sceneId?: string) {
+  const set = activeScenes.get(jobId);
+  if (!set) return;
+  if (sceneId) set.delete(sceneId);
+  else set.clear();
+  flushActive(jobId);
+}
 
 /** Scene ids that already have an artifact of this kind. */
 const existingScenes = (projectId: string, kind: string): Set<string> =>
@@ -156,22 +201,33 @@ async function execute(
       const todo = scenario.scenes.filter((s) => !done.has(s.id));
       if (done.size) log(`Keeping ${done.size} existing sheet(s); generating ${todo.length}.`);
 
-      let failed = 0;
-      for (const scene of todo) {
-        setActiveScene(jobId, scene.id);
-        log(`--- scene ${scene.id} ---`);
+      log(`Generating ${todo.length} sheet(s), ${Math.min(CONCURRENCY_IMAGE, todo.length)} at a time.`);
+
+      // Scene-prefixed logging, because parallel scenes interleave and an unprefixed
+      // line would be impossible to attribute.
+      const outcomes = await mapWithConcurrency(todo, CONCURRENCY_IMAGE, async (scene) => {
+        markActive(jobId, scene.id);
+        const slog = (m: string) => log(`[${scene.id}] ${m.trim()}`);
         try {
-          const r = await runStoryboard({ projectId, scenario, scene, log });
-          log(`  ${r.report.verdict}: ${r.report.summary}`);
-        } catch (err) {
-          // One scene failing must not abandon the rest. Image generation is refused
-          // outright for some scenes (PROHIBITED_CONTENT), which previously aborted
-          // the whole run and left every later scene ungenerated.
-          failed++;
-          log(`  FAILED: ${(err as Error).message}`);
+          const r = await runStoryboard({ projectId, scenario, scene, log: slog });
+          slog(`${r.report.verdict}: ${r.report.summary}`);
+          return r;
+        } finally {
+          clearActive(jobId, scene.id);
         }
-      }
-      setActiveScene(jobId, null);
+      });
+
+      // One scene failing must not abandon the rest. Image generation is refused
+      // outright for some scenes (PROHIBITED_CONTENT), which previously aborted the
+      // whole run and left every later scene ungenerated.
+      let failed = 0;
+      outcomes.forEach((o, i) => {
+        if (!o.ok) {
+          failed++;
+          log(`[${todo[i].id}] FAILED: ${o.error.message}`);
+        }
+      });
+      clearActive(jobId);
       // Deliberately not "press Generate again": a scene that produced a sheet
       // before failing already has an artifact, so the missing-only pass skips it.
       if (failed) log(`${failed} scene(s) failed — re-roll those individually.`);
@@ -181,7 +237,7 @@ async function execute(
     case "storyboard_one": {
       const scene = scenario.scenes.find((s) => s.id === payload.sceneId);
       if (!scene) throw new Error(`Scene ${payload.sceneId} not found`);
-      setActiveScene(jobId, scene.id);
+      markActive(jobId, scene.id);
       const r = await runStoryboard({ projectId, scenario, scene, log });
       log(`  ${r.report.verdict}: ${r.report.summary}`);
       return;
@@ -203,26 +259,38 @@ async function execute(
       const haveClip = payload.force ? new Set<string>() : existingScenes(projectId, "video");
       let failedVideos = 0;
 
-      for (const scene of scenario.scenes) {
+      const toRender = scenario.scenes.filter((scene) => {
         if (!approved.has(scene.id)) {
           log(`--- scene ${scene.id}: SKIPPED, storyboard not approved ---`);
-          continue;
+          return false;
         }
         if (haveClip.has(scene.id)) {
           log(`--- scene ${scene.id}: SKIPPED, clip already generated (re-roll it individually to replace) ---`);
-          continue;
+          return false;
         }
-        setActiveScene(jobId, scene.id);
-        log(`--- scene ${scene.id} ---`);
+        return true;
+      });
+      log(`Rendering ${toRender.length} clip(s), ${Math.min(CONCURRENCY_VIDEO, toRender.length)} at a time.`);
+
+      const videoOutcomes = await mapWithConcurrency(toRender, CONCURRENCY_VIDEO, async (scene) => {
+        markActive(jobId, scene.id);
+        const slog = (m: string) => log(`[${scene.id}] ${m.trim()}`);
         try {
-          const r = await runSceneVideo({ projectId, scenario, scene, log });
-          log(`  ${r.report.verdict}: ${r.report.summary}`);
-        } catch (err) {
-          failedVideos++;
-          log(`  FAILED: ${(err as Error).message}`);
+          const r = await runSceneVideo({ projectId, scenario, scene, log: slog });
+          slog(`${r.report.verdict}: ${r.report.summary}`);
+          return r;
+        } finally {
+          clearActive(jobId, scene.id);
         }
-      }
-      setActiveScene(jobId, null);
+      });
+
+      videoOutcomes.forEach((o, i) => {
+        if (!o.ok) {
+          failedVideos++;
+          log(`[${toRender[i].id}] FAILED: ${o.error.message}`);
+        }
+      });
+      clearActive(jobId);
       if (failedVideos) log(`${failedVideos} scene(s) failed — re-roll those individually.`);
       return;
     }
@@ -230,7 +298,7 @@ async function execute(
     case "video_one": {
       const scene = scenario.scenes.find((s) => s.id === payload.sceneId);
       if (!scene) throw new Error(`Scene ${payload.sceneId} not found`);
-      setActiveScene(jobId, scene.id);
+      markActive(jobId, scene.id);
       const r = await runSceneVideo({ projectId, scenario, scene, log });
       log(`  ${r.report.verdict}: ${r.report.summary}`);
       return;

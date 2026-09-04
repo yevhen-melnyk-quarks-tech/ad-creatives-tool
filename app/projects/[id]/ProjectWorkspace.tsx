@@ -166,6 +166,21 @@ export default function ProjectWorkspace(props: {
       return null;
     }
   };
+
+  /**
+   * Scenes a job is working right now. Parallel generation means several at once, so
+   * this is stored as a JSON array — older rows hold a bare scene id, hence the
+   * fallback rather than letting a parse failure hide every badge.
+   */
+  const activeScenesOf = (j: Job | undefined): string[] => {
+    if (!j?.active_scene) return [];
+    try {
+      const parsed = JSON.parse(j.active_scene);
+      return Array.isArray(parsed) ? (parsed as string[]) : [String(parsed)];
+    } catch {
+      return [j.active_scene];
+    }
+  };
   const card = find("character_card");
   const cardApproved = card?.approved === 1;
   const approvedSheets = artifacts.filter((a) => a.kind === "storyboard" && a.approved === 1).length;
@@ -173,9 +188,11 @@ export default function ProjectWorkspace(props: {
   /** "generating" if the running job is on this scene; "queued" if one is waiting for it. */
   const sceneJobState = (sceneId: string, kinds: string[]): "generating" | "queued" | null => {
     if (runningJob && kinds.includes(runningJob.kind)) {
-      if (runningJob.active_scene === sceneId) return "generating";
-      // A bulk job that has not named a scene yet is still about to cover this one.
-      if (runningJob.active_scene === null && !sceneOfPayload(runningJob)) return "queued";
+      const active = activeScenesOf(runningJob);
+      if (active.includes(sceneId)) return "generating";
+      // A bulk job with scenes in flight is still going to reach this one; one that
+      // has not named any scene yet is only just starting.
+      if (!sceneOfPayload(runningJob)) return "queued";
     }
     for (const j of queuedJobs) {
       if (!kinds.includes(j.kind)) continue;

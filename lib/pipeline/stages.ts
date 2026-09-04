@@ -1,7 +1,7 @@
 import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { artifact, ensureProjectDirs, safeSceneId } from "../paths";
-import { db, uid, recordCost, projectSpendUsd, getNote } from "../db";
+import { db, uid, recordCost, projectSpendUsd, getNote, reserveSpend, releaseSpend } from "../db";
 import { generateImage } from "../models/gemini";
 import {
   generateVideo, transcribe, uploadForTranscription,
@@ -268,14 +268,24 @@ export async function runSceneVideo(opts: {
     seedAdditions: previousAdditions(opts.projectId, "video", opts.scene.id),
     onLog: opts.log,
     generate: async (prompt) => {
-      const { predictionId, usd } = await generateVideo({
-        prompt,
-        referencePaths: [cardPath, sheetPath],
-        durationSeconds: duration,
-        outPath,
-        resolution,
-        onLog: opts.log,
-      });
+      // Reserved before the call and released after, so concurrent clips see each
+      // other's in-flight cost in the budget guard instead of all passing the same
+      // stale check and overshooting together.
+      reserveSpend(opts.projectId, costPerAttempt);
+      let result;
+      try {
+        result = await generateVideo({
+          prompt,
+          referencePaths: [cardPath, sheetPath],
+          durationSeconds: duration,
+          outPath,
+          resolution,
+          onLog: opts.log,
+        });
+      } finally {
+        releaseSpend(opts.projectId, costPerAttempt);
+      }
+      const { predictionId, usd } = result;
       recordCost({
         projectId: opts.projectId,
         provider: "replicate",
