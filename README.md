@@ -123,6 +123,35 @@ which used to abort the whole batch and leave every later scene ungenerated.
 Each scene row shows a **generating** badge while it is being worked on, so progress
 is visible without scrolling back to the top of a long project.
 
+## Why a scene's cast is never derived from prose
+
+A clip once shipped starring the wrong character: the boss walked to the travel agency
+as the protagonist while John trailed behind, and the boss appeared to receive his own
+firing call. The prompt was self-contradictory —
+
+> Only John's Boss appear — nobody else enters at any point. **John Carter, Sarah
+> Carter, Mia Carter, Liam Carter do NOT appear**; never use their faces.
+
+— while the action text read *"the family walks down the street... John's phone rings
+... he falls behind to answer."* Told to render a man answering a phone, told John did
+not exist, and given one permitted character, the model recast the boss. It was the
+only reading that satisfied the prompt.
+
+The cause was `charactersInFrame` matching **full names** against prose that never
+contains them. A brief says "John's", "he", "the family" — so detection found nobody,
+the per-unit cast collapsed to whoever had a dialogue line, and the identity lock then
+forbade the protagonist. Four defences now:
+
+1. The brief parser emits `charactersPresent` per frame — supplied data, not inference
+2. `detectByName` matches full names first, then name tokens and possessives, masking
+   each match so "John's Boss" cannot also count as a hit for "John Carter"
+3. `reconcileCast` widens a cast to cover anyone the action references, so a prompt
+   that says "X does not appear" while X acts is impossible to emit
+4. The parser is told to name characters explicitly and never lean on a group noun
+
+Group nouns in a hand-pasted scenario remain a gap: "the family walks" cannot be
+mapped to specific people, so only characters named outright are recovered.
+
 ## Localization set
 
 Assembly writes a second cut alongside the final one:

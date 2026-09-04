@@ -16,6 +16,14 @@ export const FrameSchema = z.object({
   action: z.string(),
   dialogue: z.object({ character: z.string(), line: z.string() }).nullable().default(null),
   noDialogueSound: z.string().nullable().default(null),
+  /**
+   * Who is visibly in this frame, named by whoever authored the scene.
+   *
+   * Optional so hand-pasted scenarios still work, but strongly preferred: deriving
+   * this from the action prose is guesswork, and getting it wrong made the identity
+   * lock forbid a scene's own protagonist.
+   */
+  charactersPresent: z.array(z.string()).optional(),
 });
 
 export const SceneSchema = z.object({

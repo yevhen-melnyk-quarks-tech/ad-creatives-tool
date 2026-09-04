@@ -70,11 +70,73 @@ export function generateCharacterCardPrompt(characters: Character[]): string {
  * expectation the prompt was built from; a second hand-maintained copy would drift.
  */
 export function charactersInFrame(frame: Frame, sceneCharacters: Character[]): Character[] {
-  const haystack = `${frame.action} ${frame.dialogue?.character ?? ""}`.toLowerCase();
-  const present = sceneCharacters.filter((c) => haystack.includes(c.name.toLowerCase()));
+  // A per-frame list written by whoever authored the scene beats the guesswork below,
+  // so it wins outright when present.
+  if (frame.charactersPresent?.length) {
+    const byName = new Map(sceneCharacters.map((c) => [c.name.toLowerCase(), c]));
+    const listed = frame.charactersPresent
+      .map((n) => byName.get(n.trim().toLowerCase()))
+      .filter((c): c is Character => Boolean(c));
+    if (listed.length) return orderBySubject(frame, listed, sceneCharacters);
+  }
 
-  // The frame's subject — whoever the shot is framed on, else the speaker — goes
-  // first, so the model reads the right identity before the supporting cast.
+  const present = detectByName(`${frame.action} ${frame.dialogue?.character ?? ""}`, sceneCharacters);
+
+  return orderBySubject(frame, present, sceneCharacters);
+}
+
+/**
+ * Finds characters referenced anywhere in a piece of prose.
+ *
+ * The previous version required the character's FULL name to appear literally, and
+ * prose never contains full names — a brief says "John's phone rings" and "the family
+ * walks", not "John Carter walks". So detection returned nobody, the per-unit cast
+ * collapsed to whoever happened to have a dialogue line, and the identity lock then
+ * told the video model that the scene's protagonist did not exist. That is how a clip
+ * ended up starring the boss instead of John.
+ *
+ * Matching is longest-name-first with the matched span masked out afterwards, which
+ * is what keeps "John's Boss" from also counting as a hit for "John Carter" — a real
+ * hazard whenever one character's name contains another's.
+ */
+export function detectByName(text: string, sceneCharacters: Character[]): Character[] {
+  let haystack = ` ${text.toLowerCase()} `;
+  const found: Character[] = [];
+
+  const tryMatch = (needle: string): boolean => {
+    const escaped = needle.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // Allows a trailing possessive: "John's phone" is a reference to John. Word
+    // boundaries on both sides so a short name cannot match inside a longer word.
+    const re = new RegExp(`(?<![\\p{L}])${escaped}(?:'s|s')?(?![\\p{L}])`, "u");
+    const m = re.exec(haystack);
+    if (!m) return false;
+    // Mask the span, so nothing else can claim the same words.
+    haystack = haystack.slice(0, m.index) + " ".repeat(m[0].length) + haystack.slice(m.index + m[0].length);
+    return true;
+  };
+
+  // Two passes, and the order is load-bearing. Every FULL name is matched first, so
+  // "John's Boss" consumes that whole span before "John" is ever tried as a token —
+  // otherwise the possessive allowance makes "John" match inside "John's Boss" and
+  // both characters get reported for a scene containing only one of them.
+  const byLength = [...sceneCharacters].sort((a, b) => b.name.length - a.name.length);
+  for (const c of byLength) {
+    if (tryMatch(c.name)) found.push(c);
+  }
+  for (const c of byLength) {
+    if (found.some((f) => f.id === c.id)) continue;
+    // A first name, or a role word like "boss". Short tokens are skipped, since a
+    // two-letter fragment matches far too much prose.
+    const tokens = c.name.split(/\s+/).filter((t) => t.length > 2).sort((a, b) => b.length - a.length);
+    if (tokens.some(tryMatch)) found.push(c);
+  }
+
+  // Back to the scene's own ordering; the sort above was only for match precedence.
+  return sceneCharacters.filter((c) => found.some((f) => f.id === c.id));
+}
+
+/** Puts the frame's subject first, so the model reads the right identity before the rest. */
+function orderBySubject(frame: Frame, present: Character[], sceneCharacters: Character[]): Character[] {
   const subjectName = (
     sceneCharacters.find((c) => frame.shotType.toLowerCase().includes(c.name.toLowerCase())) ??
     sceneCharacters.find((c) => c.name.toLowerCase() === (frame.dialogue?.character ?? "").toLowerCase())

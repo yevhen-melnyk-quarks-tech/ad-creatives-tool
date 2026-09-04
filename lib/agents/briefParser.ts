@@ -76,8 +76,15 @@ const BRIEF_SCHEMA = {
                 dialogueCharacterName: { type: "string" },
                 dialogueLine: { type: "string" },
                 noDialogueSound: { type: "string" },
+                // Everyone visibly in this frame. Supplied rather than derived,
+                // because deriving it from the prose is guesswork that once excluded
+                // a scene's own protagonist.
+                charactersPresent: { type: "array", items: { type: "string" } },
               },
-              required: ["label", "shotType", "action", "dialogueCharacterName", "dialogueLine", "noDialogueSound"],
+              required: [
+                "label", "shotType", "action", "dialogueCharacterName", "dialogueLine",
+                "noDialogueSound", "charactersPresent",
+              ],
             },
           },
         },
@@ -99,6 +106,7 @@ type RawFrame = {
   dialogueCharacterName: string;
   dialogueLine: string;
   noDialogueSound: string;
+  charactersPresent: string[];
 };
 type RawScene = {
   title: string;
@@ -138,6 +146,8 @@ function buildPrompt(rawText: string): string {
     "SCENES:",
     "- Preserve every dialogue line VERBATIM in its original language and wording — never translate it, never invent a new line, never drop a line, never merge two lines into one.",
     "- Every OTHER field (title, location, action, label, noDialogueSound) must be written in English regardless of what language the brief's narration is in — these drive image and video generation prompts, which require English. Translate the brief's scene descriptions into English; do not translate the dialogue lines themselves.",
+    "- `charactersPresent`: list EVERY character visibly in that frame, using the exact names from the character list. Include a character who is on screen but silent, and the person a phone call is with only if they are actually shown. This list is used to lock identity, and a character left out of it is explicitly told not to appear — so omitting the person the shot is about produces a clip starring the wrong character.",
+    "- Write `action` so it names characters explicitly by name. Never rely on a group noun alone: write \"John, Sarah, Mia and Liam walk down the street\" rather than \"the family walks\". Never use a bare pronoun as the only reference to who is acting. Never offer the reader a choice of staging — \"split screen or focus on X\" is a note to a designer, not a shot; pick one and describe it.",
     "- One frame per dialogue line, in order. If a scene opens with descriptive action before any line is spoken, add ONE leading frame for it with no dialogue (dialogueCharacterName and dialogueLine both empty strings), label it something like 'establishing', and use a wide or medium shot.",
     "- `title` is a SHORT descriptive name for the scene — three or four words, no scene number and no 'Scene N:' prefix (the number is added separately, so including it reads as a duplicate).",
     "- `location` must be a full visual description of the setting, not a one-word label — invent plausible concrete detail (materials, colours, light) if the brief only names the place, since this drives a consistent background across every frame of the scene.",
@@ -239,10 +249,19 @@ function hydrate(raw: RawBrief): Omit<BriefParseResult, "usd"> {
         }
       }
 
+      const present = (f.charactersPresent ?? [])
+        .map((n) => resolveName(n)?.name)
+        .filter((n): n is string => Boolean(n));
+      for (const name of present) {
+        const c = resolveName(name);
+        if (c) addChar(c);
+      }
+
       return {
         label: f.label.trim() || `frame ${frameIdx + 1}`,
         shotType: f.shotType.trim() || "Medium shot",
         lens: null,
+        charactersPresent: present.length ? present : undefined,
         action:
           dialogue || !speakerName
             ? f.action.trim()
