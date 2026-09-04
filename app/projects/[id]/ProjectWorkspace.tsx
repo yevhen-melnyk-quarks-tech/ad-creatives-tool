@@ -10,7 +10,10 @@ type Artifact = {
 };
 type SpendRow = { provider: string; operation: string; calls: number; usd: number };
 type Note = { kind: string; scene_id: string | null; note: string };
-type Job = { id: string; kind: string; status: string; error: string | null; progress: string | null };
+type Job = {
+  id: string; kind: string; status: string; error: string | null;
+  progress: string | null; active_scene: string | null;
+};
 type QaRow = { stage: string; scene_id: string | null; verdict: string; report: CriticReport };
 
 const VERDICT_STYLE: Record<string, string> = {
@@ -137,6 +140,23 @@ export default function ProjectWorkspace(props: {
   const card = find("character_card");
   const cardApproved = card?.approved === 1;
   const approvedSheets = artifacts.filter((a) => a.kind === "storyboard" && a.approved === 1).length;
+
+  // A scene is "generating" when the running job says so, or when a single-scene job
+  // for it is still queued and has not reported an active scene yet.
+  const generatingScene = (sceneId: string, kinds: string[]) =>
+    Boolean(
+      activeJob &&
+        kinds.includes(activeJob.kind) &&
+        (activeJob.active_scene === sceneId ||
+          (activeJob.active_scene === null && busy === `${activeJob.kind}:${sceneId}`))
+    );
+
+  const sheetsMissing = scenario
+    ? scenario.scenes.filter((sc) => !find("storyboard", sc.id)).length
+    : 0;
+  const videosMissing = scenario
+    ? scenario.scenes.filter((sc) => find("storyboard", sc.id)?.approved === 1 && !find("video", sc.id)).length
+    : 0;
 
   return (
     <main className="mx-auto max-w-5xl p-8">
@@ -294,10 +314,20 @@ export default function ProjectWorkspace(props: {
 
           {/* Step 2 — storyboards */}
           <Step n={2} title={`Storyboards (${approvedSheets}/${scenario.scenes.length} approved)`}>
-            <Btn onClick={() => startJob("storyboards")} busy={busy === "storyboards"} disabled={!cardApproved}>
-              Generate all
+            <Btn
+              onClick={() => startJob("storyboards")}
+              busy={busy === "storyboards"}
+              disabled={!cardApproved || sheetsMissing === 0}
+            >
+              {sheetsMissing === 0 ? "All generated" : `Generate missing (${sheetsMissing})`}
             </Btn>
             {!cardApproved && <span className="ml-3 text-xs text-neutral-500">Approve the character card first.</span>}
+            {cardApproved && (
+              <p className="mt-2 text-xs text-neutral-500">
+                Existing sheets are kept — this only generates scenes that have none. Use a scene&apos;s own Re-roll to
+                replace one.
+              </p>
+            )}
 
             <div className="mt-4 space-y-3">
               {scenario.scenes.map((scene) => {
@@ -312,12 +342,15 @@ export default function ProjectWorkspace(props: {
                       <div className="h-24 w-56 animate-pulse rounded bg-neutral-100" />
                     )}
                     <div className="flex-1 space-y-2">
-                      <p className="text-sm font-medium">
-                        Scene {scene.id} — {scene.title}
-                        <span className="ml-2 text-xs font-normal text-neutral-500">{scene.durationSeconds}s</span>
-                        {sheet && sheet.attempt > 1 && (
-                          <span className="ml-2 text-xs font-normal text-neutral-500">attempt {sheet.attempt}</span>
-                        )}
+                      <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                        <span>
+                          Scene {scene.id} — {scene.title}
+                          <span className="ml-2 text-xs font-normal text-neutral-500">{scene.durationSeconds}s</span>
+                          {sheet && sheet.attempt > 1 && (
+                            <span className="ml-2 text-xs font-normal text-neutral-500">attempt {sheet.attempt}</span>
+                          )}
+                        </span>
+                        {generatingScene(scene.id, ["storyboards", "storyboard_one"]) && <GeneratingBadge />}
                       </p>
                       <Verdict report={report} />
                       <AppliedFixes artifact={sheet} />
@@ -362,8 +395,16 @@ export default function ProjectWorkspace(props: {
             <p className="mb-2 text-xs text-neutral-500">
               Only approved storyboards are rendered — this gate is what keeps paid renders downstream of the free check.
             </p>
-            <Btn onClick={() => startJob("videos")} busy={busy === "videos"} disabled={approvedSheets === 0}>
-              Generate approved scenes
+            <Btn
+              onClick={() => startJob("videos")}
+              busy={busy === "videos"}
+              disabled={approvedSheets === 0 || videosMissing === 0}
+            >
+              {approvedSheets === 0
+                ? "Approve a storyboard first"
+                : videosMissing === 0
+                  ? "All approved scenes generated"
+                  : `Generate missing (${videosMissing})`}
             </Btn>
 
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
@@ -373,9 +414,12 @@ export default function ProjectWorkspace(props: {
                 const sheetApproved = find("storyboard", scene.id)?.approved === 1;
                 return (
                   <div key={scene.id} className="rounded border border-neutral-200 p-3">
-                    <p className="text-sm font-medium">
-                      Scene {scene.id}
-                      <span className="ml-2 text-xs font-normal text-neutral-500">{scene.durationSeconds}s</span>
+                    <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                      <span>
+                        Scene {scene.id}
+                        <span className="ml-2 text-xs font-normal text-neutral-500">{scene.durationSeconds}s</span>
+                      </span>
+                      {generatingScene(scene.id, ["videos", "video_one"]) && <GeneratingBadge />}
                     </p>
                     {clip ? (
                       <video src={fileUrl(clip.file_path)} controls className="mt-2 w-full rounded" />
@@ -507,6 +551,16 @@ function NoteBox({
         </span>
       </div>
     </div>
+  );
+}
+
+/** Inline "working on this one" marker, so progress is visible without scrolling up. */
+function GeneratingBadge() {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
+      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-600" />
+      generating
+    </span>
   );
 }
 

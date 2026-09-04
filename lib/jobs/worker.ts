@@ -1,4 +1,4 @@
-import { db, uid, recordCost } from "../db";
+import { db, uid, recordCost, recoverOrphanedJobs } from "../db";
 import { setUsageSink } from "../models/usageTracker";
 import { estimateGeminiUsd } from "../models/pricing";
 import { ScenarioSchema, type Scenario } from "../pipeline/types";
@@ -37,6 +37,10 @@ export function enqueue(projectId: string, kind: JobKind, payload: Record<string
 
 export function ensureWorker() {
   if (timer) return;
+  // A redeploy or crash leaves jobs stuck in `running`; nothing else would ever pick
+  // them up again. Recovered once, at the point the worker first starts.
+  const recovered = recoverOrphanedJobs();
+  if (recovered > 0) console.log(`[worker] requeued ${recovered} interrupted job(s)`);
   // Poll rather than event-drive: the loop is the only consumer and a 1s tick is
   // irrelevant next to job durations measured in minutes.
   timer = setInterval(() => void tick(), 1000);
@@ -61,7 +65,13 @@ async function tick() {
   if (!job) return;
 
   running = true;
-  db().prepare(`UPDATE jobs SET status='running', started_at=datetime('now') WHERE id = ?`).run(job.id);
+  db()
+    .prepare(
+      `UPDATE jobs SET status='running', started_at=datetime('now'),
+                       attempts = attempts + 1, active_scene = NULL
+        WHERE id = ?`
+    )
+    .run(job.id);
   const log = (m: string) => appendProgress(job.id, m);
 
   // Bill every Gemini call made anywhere beneath this job — image generation and all
@@ -89,6 +99,7 @@ async function tick() {
       .prepare(`UPDATE jobs SET status='failed', error=?, finished_at=datetime('now') WHERE id = ?`)
       .run(msg, job.id);
   } finally {
+    db().prepare(`UPDATE jobs SET active_scene = NULL WHERE id = ?`).run(job.id);
     setUsageSink(null);
     running = false;
   }
@@ -102,11 +113,24 @@ function loadScenario(projectId: string): Scenario {
   return ScenarioSchema.parse(JSON.parse(row.scenario_json));
 }
 
+const setActiveScene = (jobId: string, sceneId: string | null) =>
+  db().prepare(`UPDATE jobs SET active_scene = ? WHERE id = ?`).run(sceneId, jobId);
+
+/** Scene ids that already have an artifact of this kind. */
+const existingScenes = (projectId: string, kind: string): Set<string> =>
+  new Set(
+    (
+      db()
+        .prepare(`SELECT scene_id FROM artifacts WHERE project_id=? AND kind=? AND scene_id IS NOT NULL`)
+        .all(projectId, kind) as { scene_id: string }[]
+    ).map((r) => r.scene_id)
+  );
+
 const setStatus = (projectId: string, status: string) =>
   db().prepare(`UPDATE projects SET status=?, updated_at=datetime('now') WHERE id=?`).run(status, projectId);
 
 async function execute(
-  _jobId: string,
+  jobId: string,
   projectId: string,
   kind: JobKind,
   payload: Record<string, unknown>,
@@ -124,17 +148,40 @@ async function execute(
 
     case "storyboards": {
       setStatus(projectId, "storyboards");
-      for (const scene of scenario.scenes) {
+      // Only generate what is missing. Regenerating everything would overwrite
+      // sheets already reviewed and clear their approval (upsertArtifact resets
+      // `approved`), throwing away work — so this button resumes rather than restarts.
+      // `force` is available over the API for a deliberate full redo.
+      const done = payload.force ? new Set<string>() : existingScenes(projectId, "storyboard");
+      const todo = scenario.scenes.filter((s) => !done.has(s.id));
+      if (done.size) log(`Keeping ${done.size} existing sheet(s); generating ${todo.length}.`);
+
+      let failed = 0;
+      for (const scene of todo) {
+        setActiveScene(jobId, scene.id);
         log(`--- scene ${scene.id} ---`);
-        const r = await runStoryboard({ projectId, scenario, scene, log });
-        log(`  ${r.report.verdict}: ${r.report.summary}`);
+        try {
+          const r = await runStoryboard({ projectId, scenario, scene, log });
+          log(`  ${r.report.verdict}: ${r.report.summary}`);
+        } catch (err) {
+          // One scene failing must not abandon the rest. Image generation is refused
+          // outright for some scenes (PROHIBITED_CONTENT), which previously aborted
+          // the whole run and left every later scene ungenerated.
+          failed++;
+          log(`  FAILED: ${(err as Error).message}`);
+        }
       }
+      setActiveScene(jobId, null);
+      // Deliberately not "press Generate again": a scene that produced a sheet
+      // before failing already has an artifact, so the missing-only pass skips it.
+      if (failed) log(`${failed} scene(s) failed — re-roll those individually.`);
       return;
     }
 
     case "storyboard_one": {
       const scene = scenario.scenes.find((s) => s.id === payload.sceneId);
       if (!scene) throw new Error(`Scene ${payload.sceneId} not found`);
+      setActiveScene(jobId, scene.id);
       const r = await runStoryboard({ projectId, scenario, scene, log });
       log(`  ${r.report.verdict}: ${r.report.summary}`);
       return;
@@ -151,21 +198,39 @@ async function execute(
             .all(projectId) as { scene_id: string }[]
         ).map((r) => r.scene_id)
       );
+      // Never re-render a clip that already exists unless explicitly forced: this
+      // stage is billed per attempt, so silently redoing finished work costs money.
+      const haveClip = payload.force ? new Set<string>() : existingScenes(projectId, "video");
+      let failedVideos = 0;
+
       for (const scene of scenario.scenes) {
         if (!approved.has(scene.id)) {
           log(`--- scene ${scene.id}: SKIPPED, storyboard not approved ---`);
           continue;
         }
+        if (haveClip.has(scene.id)) {
+          log(`--- scene ${scene.id}: SKIPPED, clip already generated (re-roll it individually to replace) ---`);
+          continue;
+        }
+        setActiveScene(jobId, scene.id);
         log(`--- scene ${scene.id} ---`);
-        const r = await runSceneVideo({ projectId, scenario, scene, log });
-        log(`  ${r.report.verdict}: ${r.report.summary}`);
+        try {
+          const r = await runSceneVideo({ projectId, scenario, scene, log });
+          log(`  ${r.report.verdict}: ${r.report.summary}`);
+        } catch (err) {
+          failedVideos++;
+          log(`  FAILED: ${(err as Error).message}`);
+        }
       }
+      setActiveScene(jobId, null);
+      if (failedVideos) log(`${failedVideos} scene(s) failed — re-roll those individually.`);
       return;
     }
 
     case "video_one": {
       const scene = scenario.scenes.find((s) => s.id === payload.sceneId);
       if (!scene) throw new Error(`Scene ${payload.sceneId} not found`);
+      setActiveScene(jobId, scene.id);
       const r = await runSceneVideo({ projectId, scenario, scene, log });
       log(`  ${r.report.verdict}: ${r.report.summary}`);
       return;

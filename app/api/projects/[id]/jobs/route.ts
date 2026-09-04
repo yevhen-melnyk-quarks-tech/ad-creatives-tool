@@ -27,7 +27,7 @@ export async function GET(req: Request, { params }: Ctx) {
 export async function POST(req: Request, { params }: Ctx) {
   const { id } = await params;
   const body = (await req.json().catch(() => null)) as
-    | { kind?: JobKind; sceneId?: string; note?: string }
+    | { kind?: JobKind; sceneId?: string; note?: string; force?: boolean }
     | null;
   if (!body?.kind || !KINDS.includes(body.kind)) {
     return NextResponse.json({ error: `kind must be one of ${KINDS.join(", ")}` }, { status: 400 });
@@ -52,6 +52,6 @@ export async function POST(req: Request, { params }: Ctx) {
 
   // One running job at a time keeps ffmpeg and the model APIs from contending, and
   // makes the progress log readable. Queueing is fine; parallelism is not the goal.
-  const jobId = enqueue(id, body.kind, { sceneId: body.sceneId });
+  const jobId = enqueue(id, body.kind, { sceneId: body.sceneId, force: body.force === true });
   return NextResponse.json({ jobId }, { status: 202 });
 }

@@ -107,6 +107,13 @@ function migrate(d: Database.Database) {
   // Repair constraints the agent applied to produce this artifact, so a re-roll can
   // build on them and the UI can show what was actually changed.
   addColumnIfMissing(d, "artifacts", "prompt_additions", "TEXT");
+
+  // Which scene a bulk job is on right now, so the UI can mark that row as
+  // generating instead of only showing one banner at the top of a long page.
+  addColumnIfMissing(d, "jobs", "active_scene", "TEXT");
+  // Counts how many times a job has been picked up, to stop an orphaned job that
+  // crashes the process from being requeued forever.
+  addColumnIfMissing(d, "jobs", "attempts", "INTEGER NOT NULL DEFAULT 0");
 }
 
 /**
@@ -172,3 +179,29 @@ export const listNotes = (projectId: string) =>
   db()
     .prepare(`SELECT kind, scene_id, note FROM artifact_notes WHERE project_id=?`)
     .all(projectId) as { kind: string; scene_id: string | null; note: string }[];
+
+/**
+ * Requeues jobs left in `running` by a process that died mid-flight — a redeploy,
+ * a crash, an OOM kill.
+ *
+ * Without this they are zombies: the status query only looks for `queued`, so nothing
+ * ever touches them again and the UI shows them as perpetually in progress. Bulk jobs
+ * skip work that is already done, so a requeued job resumes rather than starting over.
+ *
+ * Bounded by `attempts`: a job whose work reliably kills the process would otherwise
+ * be picked up, crash, and be requeued in an endless loop.
+ */
+export function recoverOrphanedJobs(maxAttempts = 3): number {
+  const res = db()
+    .prepare(
+      `UPDATE jobs
+          SET status = CASE WHEN attempts >= ? THEN 'failed' ELSE 'queued' END,
+              error  = CASE WHEN attempts >= ? THEN 'Abandoned after repeated interruptions' ELSE error END,
+              progress = COALESCE(progress, '') ||
+                CASE WHEN attempts >= ? THEN 'Abandoned: interrupted too many times.' || char(10)
+                     ELSE 'Interrupted (process restarted) — requeued to continue.' || char(10) END
+        WHERE status = 'running'`
+    )
+    .run(maxAttempts, maxAttempts, maxAttempts);
+  return res.changes;
+}

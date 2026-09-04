@@ -103,6 +103,26 @@ Repairs are additive — they append constraints, never rewrite the prompt — s
 cannot quietly drop the scene's content. When the repair agent produces no new
 constraint, the loop stops rather than paying for the same dice roll again.
 
+## Resuming, and not losing work
+
+The bulk buttons generate only what is **missing** ("Generate missing (N)"), never
+overwriting an existing artifact — regenerating one clears its approval, so a
+blanket redo would throw away reviewed work. Replace a single artifact with its own
+Re-roll, or pass `force: true` to the jobs API for a deliberate full redo.
+
+Everything lives on the mounted volume, so approvals and artifacts survive a
+redeploy. A job interrupted mid-flight (redeploy, crash, OOM) is requeued when the
+worker next starts and continues from where it stopped, bounded by an attempt count
+so a job that reliably kills the process is eventually abandoned rather than looping.
+
+A scene that fails no longer abandons the rest of the run: each scene is isolated,
+and the log names the ones that failed. This matters because image generation and
+the repair planner are both refused outright on some scenes containing children,
+which used to abort the whole batch and leave every later scene ungenerated.
+
+Each scene row shows a **generating** badge while it is being worked on, so progress
+is visible without scrolling back to the top of a long project.
+
 ## Cost control
 
 Every billable call is written to `costs` — Seedance video, Whisper, image

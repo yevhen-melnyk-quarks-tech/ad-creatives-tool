@@ -159,7 +159,18 @@ export async function repairLoop<T>(opts: {
       break;
     }
 
-    const plan = await planRepair({ stage: opts.stage, currentPrompt: prompt, report: lastReport, onLog: opts.onLog });
+    // A failing repair planner must not lose the artifact that was just generated.
+    // It inherits the same content-filter exposure as the critic (its prompt quotes
+    // the findings and the character descriptions), and an unhandled throw here
+    // aborted the whole scene — and, in a bulk run, every scene after it.
+    let plan: RepairPlan;
+    try {
+      plan = await planRepair({ stage: opts.stage, currentPrompt: prompt, report: lastReport, onLog: opts.onLog });
+    } catch (err) {
+      opts.onLog?.(`  could not plan a repair (${(err as Error).message}) — keeping this attempt for review`);
+      stoppedBy = "no-progress";
+      break;
+    }
     opts.onLog?.(`  repair (${plan.confidence}): ${plan.diagnosis}`);
 
     const fresh = plan.promptAdditions.filter((a) => !additions.includes(a));
