@@ -135,11 +135,35 @@ export function detectByName(text: string, sceneCharacters: Character[]): Charac
   return sceneCharacters.filter((c) => found.some((f) => f.id === c.id));
 }
 
+/**
+ * Whether the character speaking this line is actually in shot.
+ *
+ * A speaker heard down a phone, over a radio, or in voice-over is NOT the frame's
+ * subject — the person listening is. Treating the speaker as the subject regardless is
+ * what put a boss in a dominant foreground close-up while the man receiving his call
+ * stood small in the background.
+ *
+ * Decided from `charactersPresent`, which is authored data about who is visible, rather
+ * than by looking for words like "phone" in the prose. When that list is absent (a
+ * hand-pasted scenario) the answer is unknowable, so the speaker is assumed visible —
+ * the previous behaviour, and the safe default for an ordinary face-to-face scene.
+ */
+export function speakerIsVisible(frame: Frame): boolean {
+  if (!frame.dialogue) return false;
+  if (!frame.charactersPresent?.length) return true;
+  const speaker = frame.dialogue.character.trim().toLowerCase();
+  return frame.charactersPresent.some((n) => n.trim().toLowerCase() === speaker);
+}
+
 /** Puts the frame's subject first, so the model reads the right identity before the rest. */
 function orderBySubject(frame: Frame, present: Character[], sceneCharacters: Character[]): Character[] {
   const subjectName = (
+    // A shot type that names someone ("Close-up on John") is the clearest signal.
     sceneCharacters.find((c) => frame.shotType.toLowerCase().includes(c.name.toLowerCase())) ??
-    sceneCharacters.find((c) => c.name.toLowerCase() === (frame.dialogue?.character ?? "").toLowerCase())
+    // Otherwise the speaker, but only when they are actually in shot.
+    (speakerIsVisible(frame)
+      ? sceneCharacters.find((c) => c.name.toLowerCase() === (frame.dialogue?.character ?? "").toLowerCase())
+      : undefined)
   )?.name;
 
   return subjectName
@@ -158,13 +182,23 @@ function frameCaptionLine(
   // frame fixed identity but overloaded caption rendering — the model started garbling
   // the text and duplicating frames. Full descriptions live in the identity-lock block
   // instead, where they are instruction text rather than text to be drawn.
-  const identities = charactersInFrame(frame, sceneCharacters)
+  const remoteVoice = Boolean(frame.dialogue) && !speakerIsVisible(frame);
+
+  // Only characters actually in shot get their appearance injected here. Naming a
+  // remote speaker's face and clothing in a frame's caption invites the image model to
+  // draw them, which is how a telephone voice ended up standing on the pavement.
+  const visible = charactersInFrame(frame, sceneCharacters).filter(
+    (c) => !remoteVoice || c.name.toLowerCase() !== frame.dialogue!.character.toLowerCase()
+  );
+  const identities = visible
     .map((c) => `${c.name.toUpperCase()} (${c.tag || c.description.split(",").slice(0, 3).join(",")})`)
     .join(", ");
 
   // Dialogue lines already carry terminal punctuation — appending one produced ".." and "?.".
   const dialoguePart = frame.dialogue
-    ? `DIALOGUE — ${frame.dialogue.character}: ${frame.dialogue.line}`
+    ? remoteVoice
+      ? `DIALOGUE — ${frame.dialogue.character} (voice only, heard through the phone, NOT visible in this frame): ${frame.dialogue.line}`
+      : `DIALOGUE — ${frame.dialogue.character}: ${frame.dialogue.line}`
     : `NO DIALOGUE.${frame.noDialogueSound ? ` Sound: ${frame.noDialogueSound}` : ""}`;
 
   return (
@@ -262,7 +296,10 @@ function buildSeedancePrompt(scene: Scene, allCharacters: Character[], useCompac
 
   scene.frames.forEach((frame, i) => {
     const dialoguePart = frame.dialogue
-      ? ` ${frame.dialogue.character} says exactly, word for word: "${frame.dialogue.line}"`
+      ? speakerIsVisible(frame)
+        ? ` ${frame.dialogue.character} says exactly, word for word: "${frame.dialogue.line}"`
+        : // Heard, not performed on camera: the speaker must not be rendered in shot.
+          ` ${frame.dialogue.character} is NOT visible in this shot — their voice is heard through the phone, saying exactly, word for word: "${frame.dialogue.line}". Show only the character listening; never place ${frame.dialogue.character} in the scene.`
       : " No dialogue.";
     parts.push(`SHOT ${i + 1} — ${frame.shotType}. ${frame.action}${dialoguePart}`, "");
   });

@@ -152,6 +152,22 @@ forbade the protagonist. Four defences now:
 Group nouns in a hand-pasted scenario remain a gap: "the family walks" cannot be
 mapped to specific people, so only characters named outright are recovered.
 
+### A speaker is not automatically the subject
+
+The frame's subject used to be whoever had the dialogue line. That is right across a
+desk and wrong down a telephone, where the person listening is who the shot is on —
+it framed a boss as a dominant foreground close-up while the man taking his call stood
+small behind him, and injected the boss's face and clothing into the frame caption so
+the image model drew him on the pavement.
+
+Visibility now comes from `charactersPresent`: a speaker absent from it is heard, not
+seen. Such a line is marked "voice only, heard through the phone, NOT visible in this
+frame", their appearance is kept out of the caption entirely, and the video prompt adds
+"show only the character listening; never place them in the scene". Decided from
+authored data rather than by searching the prose for the word "phone". A scenario with
+no `charactersPresent` keeps the old assumption, which is correct for an ordinary
+face-to-face scene.
+
 ## Localization set
 
 Assembly writes a second cut alongside the final one:
