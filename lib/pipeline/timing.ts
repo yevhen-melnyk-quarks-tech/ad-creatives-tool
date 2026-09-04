@@ -29,16 +29,25 @@ export function estimateSceneDuration(frames: Frame[]): number {
   const perFrameFloor = frames.length * 1.5; // no frame reads at under ~1.5s
 
   const seconds = Math.max(dialogueSeconds + silentSeconds, perFrameFloor);
-  return Math.max(3, Math.round(seconds));
+  return Math.max(MIN_UNIT_SECONDS, Math.round(seconds));
 }
 
 /**
- * Hard ceiling on one generated clip, from the video model's own schema
- * (`duration` is `integer, minimum -1, maximum 15`). Not a stylistic choice: a
- * request above this is rejected by the API, so any scene longer than this MUST be
- * split into separate units before it reaches generation.
+ * Hard ceiling on one generated clip. Not a stylistic choice: a request above this is
+ * rejected by the API, so any scene longer than this MUST be split into separate
+ * units before it reaches generation.
  */
 export const MAX_UNIT_SECONDS = 15;
+
+/**
+ * Shortest clip the video model will accept. Not from the schema — see
+ * SEEDANCE_MIN_DURATION in lib/models/replicate.ts for how this was found.
+ */
+export const MIN_UNIT_SECONDS = 4;
+
+/** Forces a duration into the range the video model actually accepts. */
+export const clampDuration = (seconds: number): number =>
+  Math.min(MAX_UNIT_SECONDS, Math.max(MIN_UNIT_SECONDS, Math.round(seconds)));
 
 const estimateFrameDuration = (frame: Frame): number =>
   frame.dialogue ? Math.max(1.5, countWords(frame.dialogue.line) / RATES.working) : 2.0;
@@ -65,7 +74,7 @@ export function splitSceneIntoUnits(scene: Scene): { units: Scene[]; warnings: s
   // decision — the POC's scenes were hand-timed — and re-deriving it here would both
   // overwrite that intent and, when the estimate came out slightly higher, split a
   // perfectly good 15s scene into a 14s unit plus a 3s fragment.
-  if (scene.durationSeconds >= 1 && scene.durationSeconds <= MAX_UNIT_SECONDS) {
+  if (scene.durationSeconds >= MIN_UNIT_SECONDS && scene.durationSeconds <= MAX_UNIT_SECONDS) {
     return { units: [scene], warnings };
   }
 
@@ -109,6 +118,18 @@ export function splitSceneIntoUnits(scene: Scene): { units: Scene[]; warnings: s
   }
   if (current.length) groups.push(current);
 
+  // Fold any group that would render shorter than the model's minimum into its
+  // neighbour. Balanced packing still leaves a short tail sometimes, and a 3s tail is
+  // both unrenderable and dramatically pointless — better one slightly longer unit.
+  for (let i = groups.length - 1; i > 0; i--) {
+    if (estimateSceneDuration(groups[i]) >= MIN_UNIT_SECONDS) continue;
+    const merged = [...groups[i - 1], ...groups[i]];
+    if (estimateSceneDuration(merged) <= MAX_UNIT_SECONDS) {
+      groups[i - 1] = merged;
+      groups.splice(i, 1);
+    }
+  }
+
   if (groups.length === 1) {
     // Unsplit scenes keep their plain id, matching the manual convention where only
     // scenes that actually needed splitting gained a `-n` suffix.
@@ -117,7 +138,7 @@ export function splitSceneIntoUnits(scene: Scene): { units: Scene[]; warnings: s
     // without the clamp it kept its 27s estimate and would have been refused by the
     // API despite the warning above.
     return {
-      units: [{ ...scene, durationSeconds: Math.min(MAX_UNIT_SECONDS, estimateSceneDuration(scene.frames)) }],
+      units: [{ ...scene, durationSeconds: clampDuration(estimateSceneDuration(scene.frames)) }],
       warnings,
     };
   }
@@ -142,7 +163,7 @@ export function splitSceneIntoUnits(scene: Scene): { units: Scene[]; warnings: s
       ...scene,
       id: `${scene.id}-${i + 1}`,
       title: `${scene.title} (${i + 1}/${groups.length})`,
-      durationSeconds: Math.min(MAX_UNIT_SECONDS, estimateSceneDuration(frames)),
+      durationSeconds: clampDuration(estimateSceneDuration(frames)),
       // An empty cast would strip the identity lock entirely, so fall back to the
       // full scene cast rather than emitting a unit with nobody in it.
       charactersInScene: cast.length ? cast : scene.charactersInScene,

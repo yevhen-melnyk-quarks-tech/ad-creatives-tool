@@ -18,7 +18,16 @@ export const SEEDANCE_USD_PER_SEC = Number(process.env.SEEDANCE_USD_PER_SEC ?? 0
 //   - aspect_ratio defaults to 16:9, so vertical ads must set it explicitly.
 export const SEEDANCE_PROMPT_LIMIT = 4000;
 
-/** From the live model schema: `duration` is an integer with maximum 15. */
+/**
+ * Real duration bounds, learned from the API rather than its schema.
+ *
+ * The published schema says `minimum: -1, maximum: 15` — the -1 is a sentinel for
+ * "let the model choose". The actual accepted range is 4-15, which only surfaced as a
+ * runtime rejection: "Duration must be between 4 and 15 seconds, or -1 for
+ * intelligent duration." A 3-second scene is therefore impossible to render, and
+ * trusting the schema's minimum meant a short scene failed every single attempt.
+ */
+export const SEEDANCE_MIN_DURATION = 4;
 export const SEEDANCE_MAX_DURATION = 15;
 
 function apiKey(): string {
@@ -123,10 +132,10 @@ export async function generateVideo(opts: {
   // The model's schema caps duration at 15s. Checked here as well as at scenario
   // ingest so an over-long scene can never reach a paid call and fail there — the
   // error names the fix rather than surfacing a raw provider validation message.
-  if (opts.durationSeconds < 1 || opts.durationSeconds > SEEDANCE_MAX_DURATION) {
+  if (opts.durationSeconds < SEEDANCE_MIN_DURATION || opts.durationSeconds > SEEDANCE_MAX_DURATION) {
     throw new Error(
-      `Scene duration ${opts.durationSeconds}s is outside the model's 1-${SEEDANCE_MAX_DURATION}s range. ` +
-        `Long scenes must be split into units of at most ${SEEDANCE_MAX_DURATION}s before generation.`
+      `Scene duration ${opts.durationSeconds}s is outside the model's ` +
+        `${SEEDANCE_MIN_DURATION}-${SEEDANCE_MAX_DURATION}s range.`
     );
   }
 

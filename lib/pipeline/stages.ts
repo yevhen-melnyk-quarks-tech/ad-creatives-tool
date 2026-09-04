@@ -11,6 +11,7 @@ import { critiqueCharacterCard, critiqueStoryboard, critiqueVideoScene } from ".
 import { repairLoop } from "../agents/repair";
 import { generateCharacterCardPrompt, generateStoryboardPrompt, generateSeedanceVideoPrompt } from "./prompts";
 import { buildCaptions, coverageFindings, type SceneTranscript } from "./captions";
+import { clampDuration } from "./timing";
 import type { Scenario, Scene } from "./types";
 import type { CriticReport } from "../agents/types";
 
@@ -225,11 +226,17 @@ export async function runSceneVideo(opts: {
   }
 
   const outPath = artifact.video(opts.projectId, opts.scene.id);
+  // Clamped here as well as at ingest, so a scenario stored before the real minimum
+  // was known still renders instead of failing every attempt.
+  const duration = clampDuration(opts.scene.durationSeconds);
+  if (duration !== opts.scene.durationSeconds) {
+    opts.log(`  scene is ${opts.scene.durationSeconds}s, outside the model's range — rendering at ${duration}s`);
+  }
   const basePrompt = withOperatorNote(
     generateSeedanceVideoPrompt(opts.scene, opts.scenario.characters),
     opts.projectId, "video", opts.scene.id, opts.log, SEEDANCE_PROMPT_LIMIT
   );
-  const costPerAttempt = opts.scene.durationSeconds * SEEDANCE_USD_PER_SEC;
+  const costPerAttempt = duration * SEEDANCE_USD_PER_SEC;
 
   const outcome = await repairLoop<string>({
     stage: "video",
@@ -247,7 +254,7 @@ export async function runSceneVideo(opts: {
       const { predictionId, usd } = await generateVideo({
         prompt,
         referencePaths: [cardPath, sheetPath],
-        durationSeconds: opts.scene.durationSeconds,
+        durationSeconds: duration,
         outPath,
         onLog: opts.log,
       });
