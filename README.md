@@ -365,3 +365,39 @@ app/             UI + API routes
 - Video generation is 720p from the model and upscaled at assembly; only the overlays
   are natively 1080p.
 - No auth. It is an internal tool and assumes a trusted network.
+
+## Generation history
+
+Every attempt is kept. A re-roll writes a new immutable file under `_versions/` and
+records it in `artifact_versions`; the canonical path the pipeline reads
+(`scene_X_video.mp4`) holds a **copy** promoted from one of them. That copy costs about
+10 MB per scene and buys the invariant the feature exists for: nothing that writes to
+the canonical path can corrupt the history behind it.
+
+Each take is downloadable on its own, carries the critic's verdict, and can be promoted
+back to current with "use this" — so preferring an earlier take costs nothing instead of
+requiring a paid re-roll that may never land on it again. Promoting clears the approval
+flag, because approval is of a specific image and is not tracked per take; for
+storyboards that flag is the gate in front of a paid render.
+
+Retention is manual by design: an age or count cap would quietly reintroduce the loss
+this was built to stop. "prune N old takes" in the header deletes every superseded take,
+keeping the one in use for each scene.
+
+## Caption timing
+
+`incredibly-fast-whisper` reports the first word of an audio file at 0.00 regardless of
+when speech starts. Every clip is transcribed separately, so that hit every scene: 17 of
+20 scenes in the first real project had their opening cue pinned to the first frame, and
+6 ran more than 0.3 s ahead of the audio (worst 1.25 s).
+
+`repairLeadingWordTiming` discards that timestamp and re-derives it backwards from the
+first trustworthy word at the rate measured from the rest of the line, floored at the
+clip's real audio onset. `audioOnset` supplies the floor from ffmpeg `silencedetect` —
+reading events **in order**, because a clip whose audio starts immediately still reports
+a `silence_end` for a pause in the middle, and taking the first one found put the floor
+halfway through the line.
+
+After building, every scene's first cue is checked against its measured onset. A cue
+earlier than any sound is provably wrong and is reported as an advisory finding; a cue
+*later* than the first sound is not, since ambience before a line is legitimate.

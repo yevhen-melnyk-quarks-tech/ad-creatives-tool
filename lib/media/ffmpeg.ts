@@ -229,3 +229,56 @@ export async function extractAudio(clipPath: string, outPath: string) {
   await mkdir(path.dirname(outPath), { recursive: true });
   await run(["-y", "-i", clipPath, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", outPath], "extract audio");
 }
+
+/**
+ * When audio first rises above silence in a clip, in seconds.
+ *
+ * Used to sanity-check caption timings against the actual soundtrack. It detects
+ * *audio*, not speech — music or ambience before the first line will register — so
+ * treat it as a floor ("nothing can be spoken before this") rather than as the moment
+ * a line begins. That asymmetry is deliberate: a cue earlier than any sound at all is
+ * provably wrong, while a cue later than the first sound may be perfectly correct.
+ *
+ * Returns null when the clip is silent throughout or the probe fails; callers must
+ * treat null as "no opinion" and leave timings alone.
+ */
+export async function audioOnset(clipPath: string, noiseFloorDb = -32, minSilence = 0.15): Promise<number | null> {
+  return new Promise((resolve) => {
+    const proc = execFile(
+      FFMPEG,
+      ["-v", "info", "-i", clipPath, "-af", `silencedetect=noise=${noiseFloorDb}dB:d=${minSilence}`, "-f", "null", "-"],
+      { maxBuffer: 8 * 1024 * 1024, timeout: 120_000 }
+    );
+    let err = "";
+    proc.stderr?.on("data", (d) => {
+      err += d.toString();
+    });
+    proc.on("error", () => resolve(null));
+    proc.on("close", () => {
+      // Events must be read IN ORDER, not by grepping for the first silence_end.
+      //
+      // silencedetect reports every silent stretch in the clip, so a clip whose audio
+      // starts immediately still emits a silence_end — for a pause in the middle. A
+      // naive "first silence_end" read that as the onset and would have reported
+      // perfectly-timed captions as running ahead of the audio, and floored the first
+      // word at a pause halfway through the line.
+      //
+      // Leading silence is the only case that shifts the onset, and it is identifiable:
+      // the very first event is a silence_start at (or within a frame of) zero.
+      const events = [...err.matchAll(/silence_(start|end):\s*(-?[\d.]+)/g)].map((m) => ({
+        kind: m[1],
+        at: Number(m[2]),
+      }));
+      if (!events.length) {
+        // No silence anywhere means sound throughout, provided ffmpeg actually ran.
+        return resolve(err.includes("Output #0") || err.includes("time=") ? 0 : null);
+      }
+      const [first] = events;
+      if (first.kind === "start" && first.at <= 0.05) {
+        const end = events.find((e) => e.kind === "end");
+        return resolve(end ? end.at : null); // silent for its whole duration
+      }
+      return resolve(0);
+    });
+  });
+}

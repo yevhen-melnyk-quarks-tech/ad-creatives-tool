@@ -203,7 +203,24 @@ export async function repairLoop<T>(opts: {
   return {
     result: lastResult,
     attempts: attemptsMade,
-    finalReport: lastReport,
+    // When the loop stops before its first attempt - the budget guard is the only way
+    // that happens - nothing was generated and there is no critic report. Callers
+    // dereference .verdict immediately, so returning undefined here crashed the job
+    // with a TypeError that read as an unrelated failure. Say what actually happened.
+    finalReport:
+      lastReport ??
+      ({
+        stage: opts.stage,
+        sceneId: opts.sceneId,
+        // UNAVAILABLE, not FAIL: nothing was generated, so nothing was assessed -
+        // reporting a failure would blame the artifact for a spending guard.
+        verdict: "UNAVAILABLE",
+        summary:
+          stoppedBy === "budget"
+            ? "Nothing was generated: the project budget guard stopped this run before the first attempt. Raise PROJECT_BUDGET_USD to continue."
+            : "Nothing was generated and no review ran.",
+        findings: [],
+      } satisfies CriticReport),
     accepted: false,
     appliedAdditions: additions,
     stoppedBy,

@@ -64,6 +64,14 @@ export async function GET(req: Request, { params }: Ctx) {
   const ext = path.extname(target).toLowerCase();
   const type = MIME[ext] ?? "application/octet-stream";
 
+  // Honoured for local files as well as offloaded ones. Without this, `download=1`
+  // silently did nothing on anything still on the volume — every per-take download,
+  // and any final cut before it was offloaded — and opened the video inline instead.
+  const disposition: Record<string, string> =
+    url.searchParams.get("download") === "1"
+      ? { "Content-Disposition": `attachment; filename="${path.basename(target)}"` }
+      : {};
+
   // Range support so the browser can scrub a 146-second video without downloading
   // all ~80 MB first.
   const range = req.headers.get("range");
@@ -87,6 +95,7 @@ export async function GET(req: Request, { params }: Ctx) {
           "Content-Range": `bytes ${start}-${end}/${info.size}`,
           "Accept-Ranges": "bytes",
           "Cache-Control": "no-store",
+          ...disposition,
         },
       });
     }
@@ -99,6 +108,7 @@ export async function GET(req: Request, { params }: Ctx) {
       "Content-Length": String(info.size),
       "Accept-Ranges": "bytes",
       "Cache-Control": "no-store",
+      ...disposition,
     },
   });
 }

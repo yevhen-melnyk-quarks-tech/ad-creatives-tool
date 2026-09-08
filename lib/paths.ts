@@ -28,6 +28,7 @@ export const artifact = {
   work: (id: string) => path.join(projectDir(id), "_work"),
   diag: (id: string) => path.join(projectDir(id), "_diag"),
   transcripts: (id: string) => path.join(projectDir(id), "_transcripts"),
+  versions: (id: string) => path.join(projectDir(id), "_versions"),
 };
 
 // Scene ids are user-facing strings like "5-3"; keep them filename-safe without
@@ -35,7 +36,7 @@ export const artifact = {
 export const safeSceneId = (sceneId: string) => sceneId.replace(/[^\w-]/g, "_");
 
 export async function ensureProjectDirs(projectId: string) {
-  for (const dir of [projectDir(projectId), artifact.work(projectId), artifact.diag(projectId), artifact.transcripts(projectId)]) {
+  for (const dir of [projectDir(projectId), artifact.work(projectId), artifact.diag(projectId), artifact.transcripts(projectId), artifact.versions(projectId)]) {
     await mkdir(dir, { recursive: true });
   }
 }
@@ -69,6 +70,7 @@ export async function dirSizeBytes(dir: string): Promise<number> {
 // and sheets against an ~80 MB final cut), so the UI needs a way to reclaim space
 // without destroying the thing the user actually wanted.
 export async function pruneIntermediates(projectId: string) {
+  // Note _versions is deliberately absent: generation history is not scratch.
   for (const dir of [artifact.work(projectId), artifact.diag(projectId), artifact.transcripts(projectId)]) {
     await rm(dir, { recursive: true, force: true });
   }
@@ -85,3 +87,24 @@ export const humanBytes = (n: number) => {
   }
   return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
 };
+
+/**
+ * Path for one immutable generation attempt.
+ *
+ * Every take is written here and never touched again. The canonical path above
+ * (`artifact.video`, `artifact.storyboard`, ...) holds a copy promoted from one of
+ * these — see `lib/pipeline/versions.ts` for why that is a copy and not a link.
+ */
+export function versionPath(projectId: string, kind: string, sceneId: string | null, version: number): string {
+  const ext = kind === "video" ? "mp4" : "jpg";
+  const stem = sceneId ? `scene_${safeSceneId(sceneId)}_${kind}` : kind;
+  return path.join(projectDir(projectId), "_versions", `${stem}_v${version}.${ext}`);
+}
+
+/** Canonical (current) path for a kind, matching what the rest of the pipeline reads. */
+export function currentPath(projectId: string, kind: string, sceneId: string | null): string {
+  if (kind === "video" && sceneId) return artifact.video(projectId, sceneId);
+  if (kind === "storyboard" && sceneId) return artifact.storyboard(projectId, sceneId);
+  if (kind === "character_card") return artifact.characterCard(projectId);
+  throw new Error(`No canonical path for kind ${kind} (scene ${sceneId ?? "-"})`);
+}

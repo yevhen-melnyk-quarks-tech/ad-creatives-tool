@@ -23,6 +23,10 @@ type Job = {
 };
 type QaRow = { stage: string; scene_id: string | null; verdict: string; report: CriticReport };
 type Deliverable = { name: string; label: string; remote: boolean; bytes: number | null };
+type Version = {
+  kind: string; sceneId: string | null; version: number; verdict: string | null;
+  summary: string | null; bytes: number; isCurrent: boolean; createdAt: string; name: string;
+};
 
 const KIND_LABEL: Record<string, string> = {
   character_card: "Character card",
@@ -73,8 +77,10 @@ export default function ProjectWorkspace(props: {
   const [busy, setBusy] = useState<string | null>(null);
   const [hasLoaded, setHasLoaded] = useState(false);
 
+  const [versions, setVersions] = useState<Version[]>([]);
   const [deliverables, setDeliverables] = useState<Deliverable[]>([]);
   const [storageConfigured, setStorageConfigured] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const [dismissedJobId, setDismissedJobId] = useState<string | null>(null);
   const [briefOpen, setBriefOpen] = useState(!scenario);
   const [briefText, setBriefText] = useState(props.initialBrief);
@@ -83,9 +89,10 @@ export default function ProjectWorkspace(props: {
   const [reparseWarnings, setReparseWarnings] = useState<string[] | null>(null);
 
   const refresh = useCallback(async () => {
-    const [detail, qaRes] = await Promise.all([
+    const [detail, qaRes, versionRes] = await Promise.all([
       fetch(`/api/projects/${projectId}`).then((r) => r.json()),
       fetch(`/api/projects/${projectId}/qa`).then((r) => r.json()),
+      fetch(`/api/projects/${projectId}/versions`).then((r) => r.json()),
     ]);
     setArtifacts(detail.artifacts ?? []);
     setJobs(detail.jobs ?? []);
@@ -96,6 +103,7 @@ export default function ProjectWorkspace(props: {
     setQa(qaRes.reports ?? []);
     setNotes(detail.notes ?? []);
     setDisclaimer(detail.disclaimer ?? null);
+    setVersions(versionRes.versions ?? []);
     setDeliverables(detail.deliverables ?? []);
     setStorageConfigured(Boolean(detail.storageConfigured));
     setHasLoaded(true);
@@ -110,11 +118,20 @@ export default function ProjectWorkspace(props: {
 
   async function startJob(kind: string, sceneId?: string, note?: string) {
     setBusy(sceneId ? `${kind}:${sceneId}` : kind);
-    await fetch(`/api/projects/${projectId}/jobs`, {
+    const res = await fetch(`/api/projects/${projectId}/jobs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kind, sceneId, note }),
     });
+    const data = await res.json().catch(() => ({}));
+    // Say so out loud when a click landed on work already in flight. Silence here is
+    // what made the tool look frozen and invited the duplicate paid renders.
+    if (data?.coalesced) {
+      setNotice(
+        `${KIND_LABEL[kind] ?? kind}${sceneId ? ` for scene ${sceneId}` : ""} is already ${data.status === "running" ? "generating" : "queued"} — tracking that job instead of starting a second one.`
+      );
+      setTimeout(() => setNotice(null), 6000);
+    }
     await refresh();
     setBusy(null);
   }
@@ -183,7 +200,18 @@ export default function ProjectWorkspace(props: {
     window.location.reload();
   }
 
-  const fileUrl = (p: string) => `/api/projects/${projectId}/file?name=${encodeURIComponent(p.split("/").pop() ?? "")}`;
+  /**
+   * URL for an artifact, carrying the take number.
+   *
+   * The `v` parameter is what makes a re-roll visible. A media element does not
+   * re-fetch when its src string is unchanged, so the old clip stayed on screen after
+   * a successful re-roll and read as "nothing happened" - the new file was on disk the
+   * whole time. The server ignores the parameter; the browser treats it as a new
+   * resource, which is the entire point.
+   */
+  const fileUrl = (p: string, version?: number) =>
+    `/api/projects/${projectId}/file?name=${encodeURIComponent(p.split("/").pop() ?? "")}` +
+    (version ? `&v=${version}` : "");
   const find = (kind: string, sceneId: string | null = null) =>
     artifacts.find((a) => a.kind === kind && a.scene_id === sceneId);
   const qaFor = (stage: string, sceneId: string | null = null) =>
@@ -229,6 +257,11 @@ export default function ProjectWorkspace(props: {
   };
   /** True once a deliverable has been moved to object storage, which is what makes a
    * shareable link possible — a file on the volume has no URL anyone outside can use. */
+  const supersededTakes = versions.filter((v) => !v.isCurrent).length;
+
+  const versionsFor = (kind: string, sceneId: string | null = null) =>
+    versions.filter((v) => v.kind === kind && v.sceneId === sceneId).sort((a, b) => b.version - a.version);
+
   const isRemote = (name: string) => deliverables.some((d) => d.name === name && d.remote);
 
   const card = find("character_card");
@@ -316,10 +349,32 @@ export default function ProjectWorkspace(props: {
                 await refresh();
               }}
               className="ml-1 underline transition-opacity active:opacity-60"
-              title="Delete working and diagnostic files. Keeps clips and the final video."
+              title="Delete working and diagnostic files. Keeps clips, takes and the final video."
             >
-              prune
+              prune scratch
             </button>
+            {supersededTakes > 0 && (
+              <>
+                {" · "}
+                <button
+                  onClick={async () => {
+                    // Confirmed rather than immediate: the whole point of keeping takes
+                    // is that nothing disappears without being asked for.
+                    if (!confirm(`Delete ${supersededTakes} superseded take(s)? The take in use for each scene is kept.`)) return;
+                    await fetch(`/api/projects/${projectId}/versions`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ action: "prune" }),
+                    });
+                    await refresh();
+                  }}
+                  className="underline transition-opacity active:opacity-60"
+                  title="Delete every take except the one currently in use for each scene."
+                >
+                  prune {supersededTakes} old take{supersededTakes === 1 ? "" : "s"}
+                </button>
+              </>
+            )}
           </span>
         </div>
       </header>
@@ -366,6 +421,11 @@ export default function ProjectWorkspace(props: {
       </section>
 
       {activeJob && <RunningBanner job={activeJob} scenes={activeScenesOf(activeJob)} />}
+      {notice && (
+        <p className="sticky top-0 z-20 mb-3 rounded-md border border-info-dot bg-info-bg p-3 text-sm text-info-ink">
+          {notice}
+        </p>
+      )}
       {failedJob && (
         <FailedBanner
           job={failedJob}
@@ -381,7 +441,7 @@ export default function ProjectWorkspace(props: {
             <div className="flex flex-wrap items-start gap-4">
               {card ? (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={fileUrl(card.file_path)} alt="Character card" className="w-72 rounded border border-line" />
+                <img src={fileUrl(card.file_path, card.attempt)} alt="Character card" className="w-72 rounded border border-line" />
               ) : (
                 <div className="h-40 w-72 animate-pulse rounded bg-surface-sunken" />
               )}
@@ -403,6 +463,13 @@ export default function ProjectWorkspace(props: {
                   busy={busy === "character_card"}
                   onRun={(note) => startJob("character_card", undefined, note)}
                   onClear={() => saveNote("character_card", null, "")}
+                />
+                <VersionStrip
+                  projectId={projectId}
+                  kind="character_card"
+                  sceneId={null}
+                  takes={versionsFor("character_card", null)}
+                  onChanged={refresh}
                 />
               </div>
             </div>
@@ -429,11 +496,12 @@ export default function ProjectWorkspace(props: {
               {scenario.scenes.map((scene) => {
                 const sheet = find("storyboard", scene.id);
                 const report = qaFor("storyboard", scene.id)?.report;
+                const sheetState = sceneJobState(scene.id, ["storyboards", "storyboard_one"]);
                 return (
                   <div key={scene.id} className="flex flex-wrap items-start gap-4 rounded border border-line p-3">
                     {sheet ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={fileUrl(sheet.file_path)} alt={`Scene ${scene.id}`} className="w-56 rounded border border-line" />
+                      <img src={fileUrl(sheet.file_path, sheet.attempt)} alt={`Scene ${scene.id}`} className="w-56 rounded border border-line" />
                     ) : (
                       <div className="h-24 w-56 animate-pulse rounded bg-surface-sunken" />
                     )}
@@ -446,15 +514,15 @@ export default function ProjectWorkspace(props: {
                             <span className="ml-2 text-xs font-normal text-ink-subtle">attempt {sheet.attempt}</span>
                           )}
                         </span>
-                        <JobBadge state={sceneJobState(scene.id, ["storyboards", "storyboard_one"])} />
+                        <JobBadge state={sheetState} />
                       </p>
                       <Verdict report={report} />
                       <AppliedFixes artifact={sheet} />
                       <NoteBox
                         initial={noteFor("storyboard", scene.id)}
                         label={sheet ? "Re-roll with note" : "Generate with note"}
-                        busy={busy === `storyboard_one:${scene.id}`}
-                        disabled={!cardApproved}
+                        busy={busy === `storyboard_one:${scene.id}` || sheetState !== null}
+                        disabled={!cardApproved || sheetState !== null}
                         onRun={(note) => startJob("storyboard_one", scene.id, note)}
                         onClear={() => saveNote("storyboard", scene.id, "")}
                       />
@@ -464,8 +532,8 @@ export default function ProjectWorkspace(props: {
                         <Btn
                           small
                           onClick={() => startJob("storyboard_one", scene.id)}
-                          busy={busy === `storyboard_one:${scene.id}`}
-                          disabled={!cardApproved}
+                          busy={busy === `storyboard_one:${scene.id}` || sheetState !== null}
+                          disabled={!cardApproved || sheetState !== null}
                         >
                           {sheet ? "Re-roll" : "Generate"}
                         </Btn>
@@ -479,6 +547,13 @@ export default function ProjectWorkspace(props: {
                           </Btn>
                         )}
                       </div>
+                      <VersionStrip
+                        projectId={projectId}
+                        kind="storyboard"
+                        sceneId={scene.id}
+                        takes={versionsFor("storyboard", scene.id)}
+                        onChanged={refresh}
+                      />
                     </div>
                   </div>
                 );
@@ -531,6 +606,7 @@ export default function ProjectWorkspace(props: {
                 const clip = find("video", scene.id);
                 const report = qaFor("video_scene", scene.id)?.report;
                 const sheetApproved = find("storyboard", scene.id)?.approved === 1;
+                const videoState = sceneJobState(scene.id, ["videos", "video_one"]);
                 return (
                   <div key={scene.id} className="rounded border border-line p-3">
                     <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
@@ -538,10 +614,17 @@ export default function ProjectWorkspace(props: {
                         Scene {scene.id}
                         <span className="ml-2 text-xs font-normal text-ink-subtle">{scene.durationSeconds}s</span>
                       </span>
-                      <JobBadge state={sceneJobState(scene.id, ["videos", "video_one"])} />
+                      <JobBadge state={videoState} />
                     </p>
                     {clip ? (
-                      <video src={fileUrl(clip.file_path)} controls className="mt-2 w-full rounded" />
+                      // key forces a fresh element on a new take, so the browser cannot
+                      // keep showing the clip it already decoded.
+                      <video
+                        key={`${scene.id}-v${clip.attempt}`}
+                        src={fileUrl(clip.file_path, clip.attempt)}
+                        controls
+                        className="mt-2 max-h-80 w-full rounded bg-surface-sunken object-contain"
+                      />
                     ) : (
                       <div className="mt-2 aspect-[9/16] max-h-48 w-full animate-pulse rounded bg-surface-sunken" />
                     )}
@@ -551,19 +634,26 @@ export default function ProjectWorkspace(props: {
                       {/* Gated on this scene's own storyboard approval, so a single
                           paid render cannot bypass the check that "Generate approved
                           scenes" enforces in bulk. */}
-                      <Btn
-                        small
-                        onClick={() => startJob("video_one", scene.id)}
-                        busy={busy === `video_one:${scene.id}`}
-                        disabled={!sheetApproved}
-                      >
-                        {clip ? "Re-roll" : "Generate"}
-                      </Btn>
+                      {/* Disabled from queued right through running, not just while
+                          the POST is in flight: the button used to free up seconds
+                          before generation even started, which read as a hang and
+                          invited a second paid click. */}
+                      <div className="flex flex-wrap gap-2">
+                        <Btn
+                          small
+                          onClick={() => startJob("video_one", scene.id)}
+                          busy={busy === `video_one:${scene.id}` || videoState !== null}
+                          disabled={!sheetApproved || videoState !== null}
+                        >
+                          {clip ? "Re-roll" : "Generate"}
+                        </Btn>
+                      </div>
                       {sheetApproved && (
                         <NoteBox
                           initial={noteFor("video", scene.id)}
                           label={clip ? "Re-roll with note" : "Generate with note"}
-                          busy={busy === `video_one:${scene.id}`}
+                          busy={busy === `video_one:${scene.id}` || videoState !== null}
+                          disabled={videoState !== null}
                           onRun={(note) => startJob("video_one", scene.id, note)}
                           onClear={() => saveNote("video", scene.id, "")}
                         />
@@ -571,6 +661,13 @@ export default function ProjectWorkspace(props: {
                       {!sheetApproved && (
                         <p className="text-xs text-ink-subtle">Approve this storyboard first.</p>
                       )}
+                      <VersionStrip
+                        projectId={projectId}
+                        kind="video"
+                        sceneId={scene.id}
+                        takes={versionsFor("video", scene.id)}
+                        onChanged={refresh}
+                      />
                     </div>
                   </div>
                 );
@@ -970,6 +1067,91 @@ function StorageRow({
         </>
       ) : null}
     </p>
+  );
+}
+
+
+/**
+ * Every take of one artifact, with a download per take and a way back to an older one.
+ *
+ * Built for a specific request: "even if I re-roll, keep the previous generation and
+ * let me download it separately — sometimes from two bad takes you can splice a good
+ * one." So each take is a real file, downloadable on its own, and "use this" puts an
+ * earlier one back into the assembly without paying to re-roll and hoping the model
+ * lands on it again.
+ */
+function VersionStrip({
+  projectId,
+  kind,
+  sceneId,
+  takes,
+  onChanged,
+}: {
+  projectId: string;
+  kind: string;
+  sceneId: string | null;
+  takes: Version[];
+  onChanged: () => void;
+}) {
+  const [busyVersion, setBusyVersion] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // One take is just the current artifact, already on screen above.
+  if (takes.length < 2) return null;
+
+  async function promote(version: number) {
+    setBusyVersion(version);
+    setError(null);
+    const res = await fetch(`/api/projects/${projectId}/versions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "promote", kind, sceneId, version }),
+    });
+    if (!res.ok) setError((await res.json()).error ?? "Could not switch take");
+    setBusyVersion(null);
+    onChanged();
+  }
+
+  return (
+    <div className="rounded border border-line bg-surface-muted p-2">
+      <p className="mb-1.5 text-xs font-medium text-ink-muted">
+        {takes.length} takes kept
+      </p>
+      <ul className="space-y-1">
+        {takes.map((t) => (
+          <li key={t.version} className="flex flex-wrap items-baseline gap-2 text-xs">
+            <span className={t.isCurrent ? "font-medium text-ink" : "text-ink-subtle"}>
+              v{t.version}
+            </span>
+            {t.isCurrent && (
+              <span className="rounded bg-ok-bg px-1.5 py-0.5 text-[10px] font-medium text-ok-ink">in use</span>
+            )}
+            {t.verdict && (
+              <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${VERDICT_STYLE[t.verdict] ?? "bg-surface-raised text-ink-soft"}`}>
+                {t.verdict}
+              </span>
+            )}
+            <a
+              href={`/api/projects/${projectId}/file?name=${encodeURIComponent(t.name)}&download=1`}
+              className="text-ink-subtle underline transition-opacity active:opacity-60 hover:text-ink"
+            >
+              download
+            </a>
+            {!t.isCurrent && (
+              <button
+                onClick={() => promote(t.version)}
+                disabled={busyVersion !== null}
+                className="text-ink-subtle underline transition-opacity active:opacity-60 hover:text-ink disabled:opacity-40"
+              >
+                {busyVersion === t.version ? "switching…" : "use this"}
+              </button>
+            )}
+            <span className="text-ink-subtle">{(t.bytes / 1e6).toFixed(1)} MB</span>
+          </li>
+        ))}
+      </ul>
+      {error && <p className="mt-1.5 text-xs text-danger-ink">{error}</p>}
+    </div>
   );
 }
 

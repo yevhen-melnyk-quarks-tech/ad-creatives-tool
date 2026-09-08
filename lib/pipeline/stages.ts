@@ -8,14 +8,18 @@ import {
   SEEDANCE_USD_PER_SEC_BY_RES, SEEDANCE_PROMPT_LIMIT, VIDEO_RESOLUTIONS,
   type VideoResolution,
 } from "../models/replicate";
-import { buildContactSheet, extractFrames, extractAudio, durationOf, exists } from "../media/ffmpeg";
+import { buildContactSheet, extractFrames, extractAudio, durationOf, exists, audioOnset } from "../media/ffmpeg";
 import { assembleFinal } from "../media/assemble";
 import { offloadDeliverables, dropRemoteDeliverables } from "../storage/deliverables";
+import { allocateVersion, recordVersion, annotateVersion, promoteVersion } from "./versions";
 import { checkAssembly } from "../agents/assemblyCheck";
 import { critiqueCharacterCard, critiqueStoryboard, critiqueVideoScene } from "../agents/critics";
 import { repairLoop } from "../agents/repair";
 import { generateCharacterCardPrompt, generateStoryboardPrompt, generateSeedanceVideoPrompt, detectByName } from "./prompts";
-import { buildCaptions, coverageFindings, transcriptSrt, type SceneTranscript } from "./captions";
+import {
+  buildCaptions, coverageFindings, transcriptSrt, repairLeadingWordTiming, timingFindings,
+  type SceneTranscript,
+} from "./captions";
 import { clampDuration } from "./timing";
 import { DESCRIPTORS, descriptorText, splitDescriptor, isDescriptorType, type DescriptorType } from "./descriptors";
 import type { Scenario, Scene, Character } from "./types";
@@ -165,6 +169,8 @@ export async function runCharacterCard(opts: {
   const outPath = artifact.characterCard(opts.projectId);
   const basePrompt = generateCharacterCardPrompt(opts.scenario.characters);
   const note = operatorNoteBlock(basePrompt, opts.projectId, "character_card", null, opts.log);
+  // Which take the current attempt produced, shared between generate and critique.
+  let takeVersion = 0;
 
   const outcome = await repairLoop<string>({
     stage: "character card",
@@ -176,18 +182,32 @@ export async function runCharacterCard(opts: {
     trailingInstruction: note,
     onLog: opts.log,
     generate: async (prompt) => {
-      await generateImage({ prompt, outPath, onLog: opts.log });
+      // Generated into its own immutable file, then promoted onto the canonical path.
+      // A re-roll adds a take instead of destroying the one already there.
+      const take = await allocateVersion(opts.projectId, "character_card", null);
+      await generateImage({ prompt, outPath: take.file, onLog: opts.log });
+      await recordVersion({
+        projectId: opts.projectId, kind: "character_card", sceneId: null,
+        version: take.version, filePath: take.file, prompt,
+      });
+      await promoteVersion(opts.projectId, "character_card", null, take.version);
+      takeVersion = take.version;
       return outPath;
     },
-    critique: (_r, prompt, attempt) => {
-      upsertArtifact({ projectId: opts.projectId, kind: "character_card", filePath: outPath, prompt, attempt });
-      return critiqueCharacterCard({
+    critique: async (_r, prompt, attempt) => {
+      upsertArtifact({
+        projectId: opts.projectId, kind: "character_card", filePath: outPath, prompt,
+        attempt: takeVersion,
+      });
+      const report = await critiqueCharacterCard({
         projectId: opts.projectId,
         cardPath: outPath,
         characters: opts.scenario.characters,
         attempt,
         onLog: opts.log,
       });
+      annotateVersion(opts.projectId, "character_card", null, takeVersion, report.verdict, report.summary);
+      return report;
     },
   });
 
@@ -215,6 +235,8 @@ export async function runStoryboard(opts: {
   const basePrompt = generateStoryboardPrompt(scene, opts.scenario.characters);
   const note = operatorNoteBlock(basePrompt, opts.projectId, "storyboard", opts.scene.id, opts.log);
 
+  let takeVersion = 0;
+
   const outcome = await repairLoop<string>({
     stage: "storyboard",
     projectId: opts.projectId,
@@ -228,19 +250,26 @@ export async function runStoryboard(opts: {
     trailingInstruction: note,
     onLog: opts.log,
     generate: async (prompt) => {
-      await generateImage({ prompt, outPath, referencePaths: [cardPath], onLog: opts.log });
+      const take = await allocateVersion(opts.projectId, "storyboard", opts.scene.id);
+      await generateImage({ prompt, outPath: take.file, referencePaths: [cardPath], onLog: opts.log });
+      await recordVersion({
+        projectId: opts.projectId, kind: "storyboard", sceneId: opts.scene.id,
+        version: take.version, filePath: take.file, prompt,
+      });
+      await promoteVersion(opts.projectId, "storyboard", opts.scene.id, take.version);
+      takeVersion = take.version;
       return outPath;
     },
-    critique: (_r, prompt, attempt) => {
+    critique: async (_r, prompt, attempt) => {
       upsertArtifact({
         projectId: opts.projectId,
         kind: "storyboard",
         sceneId: opts.scene.id,
         filePath: outPath,
         prompt,
-        attempt,
+        attempt: takeVersion,
       });
-      return critiqueStoryboard({
+      const report = await critiqueStoryboard({
         projectId: opts.projectId,
         cardPath,
         sheetPath: outPath,
@@ -252,6 +281,8 @@ export async function runStoryboard(opts: {
         samples: 2,
         onLog: opts.log,
       });
+      annotateVersion(opts.projectId, "storyboard", opts.scene.id, takeVersion, report.verdict, report.summary);
+      return report;
     },
   });
 
@@ -287,6 +318,8 @@ export async function runSceneVideo(opts: {
   );
   const costPerAttempt = duration * SEEDANCE_USD_PER_SEC_BY_RES[resolution];
 
+  let takeVersion = 0;
+
   const outcome = await repairLoop<string>({
     stage: "video",
     projectId: opts.projectId,
@@ -305,19 +338,28 @@ export async function runSceneVideo(opts: {
       // other's in-flight cost in the budget guard instead of all passing the same
       // stale check and overshooting together.
       reserveSpend(opts.projectId, costPerAttempt);
+      const take = await allocateVersion(opts.projectId, "video", opts.scene.id);
       let result;
       try {
+        // Rendered into its own file, so a re-roll that comes back worse than the take
+        // it replaced no longer destroys the better one.
         result = await generateVideo({
           prompt,
           referencePaths: [cardPath, sheetPath],
           durationSeconds: duration,
-          outPath,
+          outPath: take.file,
           resolution,
           onLog: opts.log,
         });
       } finally {
         releaseSpend(opts.projectId, costPerAttempt);
       }
+      await recordVersion({
+        projectId: opts.projectId, kind: "video", sceneId: opts.scene.id,
+        version: take.version, filePath: take.file, prompt,
+      });
+      await promoteVersion(opts.projectId, "video", opts.scene.id, take.version);
+      takeVersion = take.version;
       const { predictionId, usd } = result;
       recordCost({
         projectId: opts.projectId,
@@ -336,7 +378,7 @@ export async function runSceneVideo(opts: {
         sceneId: opts.scene.id,
         filePath: outPath,
         prompt,
-        attempt,
+        attempt: takeVersion,
       });
       const safe = safeSceneId(opts.scene.id);
       // Native-resolution frames for the critic; the contact sheet is still written
@@ -349,7 +391,7 @@ export async function runSceneVideo(opts: {
       await buildContactSheet(outPath, path.join(artifact.diag(opts.projectId), `vaudit_${safe}.jpg`)).catch(
         () => undefined
       );
-      return critiqueVideoScene({
+      const report = await critiqueVideoScene({
         projectId: opts.projectId,
         cardPath,
         framePaths: frames,
@@ -358,6 +400,8 @@ export async function runSceneVideo(opts: {
         samples: 2,
         onLog: opts.log,
       });
+      annotateVersion(opts.projectId, "video", opts.scene.id, takeVersion, report.verdict, report.summary);
+      return report;
     },
   });
 
@@ -403,6 +447,7 @@ export async function runCaptions(opts: {
   jobId?: string;
 }): Promise<{ cueCount: number; findings: ReturnType<typeof coverageFindings> }> {
   const transcripts: SceneTranscript[] = [];
+  const onsets: { sceneId: string; onsetSeconds: number | null }[] = [];
   await mkdir(artifact.transcripts(opts.projectId), { recursive: true });
 
   // Total is the scenes with dialogue, since silent ones are skipped without a call.
@@ -426,7 +471,18 @@ export async function runCaptions(opts: {
     const wav = path.join(artifact.transcripts(opts.projectId), `${safeSceneId(scene.id)}.wav`);
     await extractAudio(clip, wav);
     const url = await uploadForTranscription(wav, opts.log);
-    const words = await transcribe({ audioUrl: url, onLog: opts.log });
+    const rawWords = await transcribe({ audioUrl: url, onLog: opts.log });
+    // The model pins the first word of every audio file to 0.00; each clip is
+    // transcribed on its own, so without this every scene's captions lead its audio.
+    const onset = await audioOnset(clip);
+    const words = repairLeadingWordTiming(rawWords, onset);
+    if (words[0] && rawWords[0] && words[0].start !== rawWords[0].start) {
+      opts.log(
+        `    first word "${rawWords[0].word}" reported at ${rawWords[0].start.toFixed(2)}s, ` +
+          `corrected to ${words[0].start.toFixed(2)}s (audio starts at ${(onset ?? 0).toFixed(2)}s)`
+      );
+    }
+    onsets.push({ sceneId: scene.id, onsetSeconds: onset });
     recordCost({
       projectId: opts.projectId,
       provider: "replicate",
@@ -460,7 +516,24 @@ export async function runCaptions(opts: {
   await writeFile(artifact.transcriptSrt(opts.projectId), transcriptSrt(result.transcript), "utf-8");
   opts.log(`  ${result.cueCount} caption cues, ${result.transcript.length} transcript line(s)`);
 
-  return { cueCount: result.cueCount, findings: coverageFindings(result.coverage) };
+  // Two independent checks on the same output: coverage asks whether the clip says the
+  // scripted words at all, timing asks whether the cues land on the sound. The timing
+  // one exists because captions that are wrong in time still look perfectly fine on
+  // disk - which is exactly how they shipped out of sync.
+  const timed = result.timing.map((t) => ({
+    ...t,
+    onsetSeconds: onsets.find((o) => o.sceneId === t.sceneId)?.onsetSeconds ?? null,
+  }));
+  const findings = [...coverageFindings(result.coverage), ...timingFindings(timed)];
+  const early = findings.filter((f) => f.category === "caption-timing");
+  if (early.length) {
+    opts.log(`  WARNING: ${early.length} scene(s) still have subtitles ahead of the audio:`);
+    for (const f of early) opts.log(`    - ${f.detail}`);
+  } else {
+    opts.log(`  timing check: every scene's first cue lands on or after its audio onset.`);
+  }
+
+  return { cueCount: result.cueCount, findings };
 }
 
 const offsetTotal = (ts: SceneTranscript[]) => ts.reduce((sum, t) => sum + t.durationSeconds, 0);

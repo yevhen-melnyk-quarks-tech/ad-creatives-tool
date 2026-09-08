@@ -50,6 +50,41 @@ export async function POST(req: Request, { params }: Ctx) {
     if (kindForNote) setNote(id, kindForNote, body.sceneId ?? null, body.note);
   }
 
+  // Collapse a repeat request onto the job already in flight.
+  //
+  // Generation starts seconds after the row is inserted, so the interface looks idle
+  // right after a click. The motion designer read that as a hang, clicked again, and
+  // paid for a second render of the same scene - "click re-roll a few times and it
+  // re-generates a few times". Guarding only in the client would leave the same hole
+  // open to a second tab, a double-tap, or a stale page, so the queue itself refuses.
+  //
+  // Keyed on scene as well as kind: two different scenes may legitimately be queued at
+  // once, the same scene twice may not.
+  const existing = db()
+    .prepare(
+      `SELECT id, kind, status, payload FROM jobs
+        WHERE project_id = ? AND kind = ? AND status IN ('queued', 'running')
+        ORDER BY created_at LIMIT 20`
+    )
+    .all(id, body.kind) as { id: string; kind: string; status: string; payload: string }[];
+
+  const duplicate = existing.find((j) => {
+    try {
+      return (JSON.parse(j.payload).sceneId ?? null) === (body.sceneId ?? null);
+    } catch {
+      return false;
+    }
+  });
+
+  if (duplicate) {
+    // 200 with the in-flight id, not an error: the user's intent is already being
+    // carried out, so the interface should track that job rather than show a failure.
+    return NextResponse.json(
+      { jobId: duplicate.id, coalesced: true, status: duplicate.status },
+      { status: 200 }
+    );
+  }
+
   // One running job at a time keeps ffmpeg and the model APIs from contending, and
   // makes the progress log readable. Queueing is fine; parallelism is not the goal.
   const jobId = enqueue(id, body.kind, { sceneId: body.sceneId, force: body.force === true });

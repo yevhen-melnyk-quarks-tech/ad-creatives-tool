@@ -112,6 +112,33 @@ function migrate(d: Database.Database) {
       PRIMARY KEY (project_id, name)
     );
 
+    -- Every generation attempt, kept rather than overwritten.
+    --
+    -- The tool used to write each attempt over scene_X_video.mp4 and upsert a single
+    -- artifacts row, so a re-roll destroyed the previous take - including a good one
+    -- replaced by a worse one. The motion designer's request was explicit: two poor
+    -- takes can be spliced into a usable one, so nothing may be discarded silently.
+    --
+    -- Version files are immutable. The canonical scene_X_video.mp4 that assembly,
+    -- transcription and the critics all read is a COPY promoted from one of these, so
+    -- no code writing to the canonical path can corrupt the history behind it.
+    CREATE TABLE IF NOT EXISTS artifact_versions (
+      id          TEXT PRIMARY KEY,
+      project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      kind        TEXT NOT NULL,          -- 'character_card' | 'storyboard' | 'video'
+      scene_id    TEXT,
+      version     INTEGER NOT NULL,       -- 1-based within (project, kind, scene)
+      file_path   TEXT NOT NULL,
+      prompt      TEXT,
+      verdict     TEXT,                   -- the critic's verdict for this take
+      summary     TEXT,
+      bytes       INTEGER NOT NULL DEFAULT 0,
+      is_current  INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(project_id, kind, scene_id, version)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_versions ON artifact_versions(project_id, kind, scene_id, version);
     CREATE INDEX IF NOT EXISTS idx_jobs_status    ON jobs(status, created_at);
     CREATE INDEX IF NOT EXISTS idx_qa_project     ON qa_runs(project_id, stage);
     CREATE INDEX IF NOT EXISTS idx_costs_project  ON costs(project_id);

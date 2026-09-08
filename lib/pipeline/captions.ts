@@ -148,6 +148,8 @@ export type CaptionResult = {
   /** Per-scene alignment coverage. A low ratio means the clip did not say the script. */
   coverage: { sceneId: string; matched: number; total: number; ratio: number }[];
   transcript: TranscriptLine[];
+  /** First cue of each scene, relative to that scene's own start. */
+  timing: { sceneId: string; firstCueRelative: number }[];
 };
 
 export function buildCaptions(scenes: Scene[], transcripts: SceneTranscript[]): CaptionResult {
@@ -155,6 +157,7 @@ export function buildCaptions(scenes: Scene[], transcripts: SceneTranscript[]): 
   const cues: { start: number; end: number; text: string }[] = [];
   const coverage: CaptionResult["coverage"] = [];
   const transcript: TranscriptLine[] = [];
+  const timing: CaptionResult["timing"] = [];
   let offset = 0;
 
   for (const scene of scenes) {
@@ -180,7 +183,9 @@ export function buildCaptions(scenes: Scene[], transcripts: SceneTranscript[]): 
     });
 
     const times = fillGaps(scriptWords, mapped, 0.6, Math.max(1.2, t.durationSeconds - 0.3));
-    for (const c of chunk(scriptWords, times)) {
+    const sceneCues = chunk(scriptWords, times);
+    if (sceneCues.length) timing.push({ sceneId: scene.id, firstCueRelative: sceneCues[0].start });
+    for (const c of sceneCues) {
       cues.push({ start: c.start + offset, end: c.end + offset, text: c.text });
     }
 
@@ -223,7 +228,7 @@ export function buildCaptions(scenes: Scene[], transcripts: SceneTranscript[]): 
 
   const srt = cues.map((c, i) => `${i + 1}\n${srtTime(c.start)} --> ${srtTime(c.end)}\n${c.text}\n`).join("\n");
   transcript.sort((a, b) => a.start - b.start);
-  return { srt, cueCount: cues.length, coverage, transcript };
+  return { srt, cueCount: cues.length, coverage, transcript, timing };
 }
 
 /**
@@ -259,4 +264,75 @@ export function coverageFindings(coverage: CaptionResult["coverage"]) {
           ? "The clip is probably not saying the scripted line."
           : "Captions may drift; check the audio against the script."),
     }));
+}
+
+/**
+ * Repairs the leading word timestamp of a transcription.
+ *
+ * `incredibly-fast-whisper` reports the FIRST word of an audio file at 0.00 regardless
+ * of when speech actually starts. Because every clip is transcribed separately, that
+ * hit every scene: 17 of this project's 20 scenes had their first caption cue pinned to
+ * the very first frame while the line was not spoken for another 0.15-4.69 seconds, so
+ * subtitles ran ahead of the voiceover for the whole ad.
+ *
+ * The tell is a gap the words themselves cannot explain - scene 1-1 read
+ * `Dad,@0.00  are@1.10`, a 1.1 s pause inside "Dad, are we really going". So the
+ * leading timestamp is discarded and re-derived backwards from the first word that is
+ * trustworthy, using the speaking rate measured from the rest of the line, then floored
+ * at the clip's real audio onset because nothing can be spoken before there is sound.
+ *
+ * On the same scene the two independent methods agree to 10 ms (interpolation 0.75 s,
+ * measured onset 0.74 s), which is what makes this a correction rather than a guess.
+ */
+export function repairLeadingWordTiming(words: WhisperWord[], onsetSeconds: number | null): WhisperWord[] {
+  if (words.length < 2) return words;
+
+  const [first, second] = words;
+  const gap = second.start - first.start;
+
+  // Rate from the words after the first, which carry sound timestamps.
+  const tail = words.slice(1);
+  const span = tail[tail.length - 1].end - tail[0].start;
+  const chars = tail.reduce((n, w) => n + w.word.length, 0);
+  const secondsPerChar = span > 0 && chars > 0 ? span / chars : 0.06;
+  const estimated = Math.max(0.12, first.word.length * secondsPerChar);
+
+  // Only intervene when the reported gap is far larger than the word could occupy.
+  // A correctly timed leading word sits snug against the next one and is left alone.
+  if (gap <= estimated * 2) return words;
+
+  const floor = onsetSeconds ?? 0;
+  const start = Math.max(floor, second.start - estimated);
+  return [{ ...first, start, end: Math.max(start + estimated * 0.8, Math.min(first.end, second.start)) }, ...tail];
+}
+
+/**
+ * Scenes whose first cue precedes any sound in the clip.
+ *
+ * Advisory rather than blocking, by decision: it proves the cue is wrong (no speech can
+ * precede the first audio sample) but not by how much a viewer would notice, and a hard
+ * stop mid-assembly is worse than a visible warning. The reverse case - a cue later
+ * than the first sound - is NOT reported, because ambience or music before the first
+ * line makes that legitimate.
+ */
+export function timingFindings(
+  checks: { sceneId: string; firstCueRelative: number; onsetSeconds: number | null }[],
+  toleranceSeconds = 0.3
+) {
+  return checks.flatMap(({ sceneId, firstCueRelative, onsetSeconds }) => {
+    if (onsetSeconds === null) return [];
+    const lead = onsetSeconds - firstCueRelative;
+    if (lead <= toleranceSeconds) return [];
+    return [
+      {
+        blocking: false,
+        category: "caption-timing",
+        subject: `scene ${sceneId}`,
+        detail:
+          `Scene ${sceneId}: the first subtitle appears ${lead.toFixed(2)}s before any sound in the clip ` +
+          `(cue at ${firstCueRelative.toFixed(2)}s, audio starts at ${onsetSeconds.toFixed(2)}s). ` +
+          `Captions will read ahead of the voiceover. Re-run captions for this scene.`,
+      },
+    ];
+  });
 }
