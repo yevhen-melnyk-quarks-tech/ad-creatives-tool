@@ -3,7 +3,7 @@ import path from "node:path";
 import { db } from "../db";
 import { projectDir, humanBytes } from "../paths";
 import { exists } from "../media/ffmpeg";
-import { r2Config, putFile, objectSize, deleteObject, presignGet, objectKey } from "./r2";
+import { r2Config, putFile, objectSize, presignGet, objectKey } from "./r2";
 
 /**
  * Moving finished deliverables off the container volume.
@@ -113,19 +113,6 @@ export async function offloadDeliverables(projectId: string, log: (m: string) =>
   if (moved) log(`  moved ${moved} file(s), ${humanBytes(bytes)} freed from the volume`);
   else log("  nothing to move");
   return { moved, bytes };
-}
-
-/**
- * Removes a project's stored objects. Used when its deliverables are about to be
- * rebuilt, so a stale row can never outlive the file it describes.
- */
-export async function dropRemoteDeliverables(projectId: string) {
-  const c = r2Config();
-  const rows = db().prepare(`SELECT * FROM remote_objects WHERE project_id=?`).all(projectId) as RemoteRow[];
-  for (const row of rows) {
-    if (c) await deleteObject(c, row.object_key).catch(() => {});
-  }
-  db().prepare(`DELETE FROM remote_objects WHERE project_id=?`).run(projectId);
 }
 
 /** Where each deliverable currently is, for the interface to show. */

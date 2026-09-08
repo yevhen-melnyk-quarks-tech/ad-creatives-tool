@@ -10,7 +10,7 @@ import {
 } from "../models/replicate";
 import { buildContactSheet, extractFrames, extractAudio, durationOf, exists, audioOnset } from "../media/ffmpeg";
 import { assembleFinal } from "../media/assemble";
-import { offloadDeliverables, dropRemoteDeliverables } from "../storage/deliverables";
+import { offloadDeliverables } from "../storage/deliverables";
 import { allocateVersion, recordVersion, annotateVersion, promoteVersion } from "./versions";
 import { checkAssembly } from "../agents/assemblyCheck";
 import { critiqueCharacterCard, critiqueStoryboard, critiqueVideoScene } from "../agents/critics";
@@ -645,9 +645,17 @@ export async function runAssembly(opts: {
       `"${[disclaimer.bold, disclaimer.body].filter(Boolean).join(" ")}"`
   );
 
-  // Any previously stored copies describe the cut that is about to be replaced. Drop
-  // them before the render, so a stale signed URL can never outlive the file it named.
-  await dropRemoteDeliverables(opts.projectId);
+  // The previously delivered cut is deliberately NOT deleted here.
+  //
+  // It used to be, to stop a stale signed URL outliving the file it named. But once a
+  // project's deliverables are offloaded the local copies are gone, so deleting the
+  // stored ones before the render left exactly one copy of the finished ad - the one
+  // ffmpeg was about to write. A failed render (out of disk, out of memory, a killed
+  // process, all of which have happened here) meant the finished ad existed nowhere.
+  //
+  // Nothing is lost by keeping it: the offload at the end writes to the same keys, so
+  // the new cut replaces the old one atomically from a reader's point of view. Until it
+  // does, a download link serves the previous cut, which beats serving nothing.
 
   const { storyDurationSeconds, totalDurationSeconds, cleanPath } = await assembleFinal({
     clipPaths,
