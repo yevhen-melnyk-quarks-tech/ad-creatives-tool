@@ -315,9 +315,23 @@ export function repairLeadingWordTiming(words: WhisperWord[], onsetSeconds: numb
   const secondsPerChar = span > 0 && chars > 0 ? span / chars : 0.06;
   const estimated = Math.max(0.12, first.word.length * secondsPerChar);
 
-  // Only intervene when the reported gap is far larger than the word could occupy.
-  // A correctly timed leading word sits snug against the next one and is left alone.
-  if (gap <= estimated * 2) return words;
+  // Only re-derive when the reported gap is far larger than the word could occupy.
+  // A leading word that sits snug against the next one carries no evidence of being
+  // fabricated, so its timestamp is not second-guessed.
+  //
+  // The onset floor still applies to it, though, and applies always: no speech can
+  // begin before the clip's first sound, whatever the model reported. That is a
+  // physical bound rather than an estimate, it can only move a cue later, and it is
+  // what catches the case with no gap to give the fabrication away - a run of words
+  // reported contiguously from 0.00 on a clip that is silent for its first third.
+  if (gap <= estimated * 2) {
+    const floorOnly = onsetSeconds ?? 0;
+    if (first.start >= floorOnly) return words;
+    return [
+      { ...first, start: floorOnly, end: Math.max(floorOnly + 0.12, Math.min(first.end, second.start)) },
+      ...tail,
+    ];
+  }
 
   const floor = onsetSeconds ?? 0;
   const start = Math.max(floor, second.start - estimated);
