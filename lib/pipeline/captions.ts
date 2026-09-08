@@ -123,7 +123,20 @@ const srtTime = (sec: number) => {
   return `${h}:${m}:${s},${String(ms % 1000).padStart(3, "0")}`;
 };
 
-export type SceneTranscript = { sceneId: string; durationSeconds: number; words: WhisperWord[] };
+export type SceneTranscript = {
+  sceneId: string;
+  durationSeconds: number;
+  words: WhisperWord[];
+  /**
+   * Set when transcription could not be obtained for this scene.
+   *
+   * It has to be distinguishable from "transcribed and found nothing": a failed scene
+   * must contribute its duration to the running offset but emit no cues, because
+   * inventing evenly-spread timings for a line nobody timed produces captions that are
+   * confidently wrong, and omitting the scene entirely shifts every cue after it.
+   */
+  failed?: boolean;
+};
 
 /**
  * One spoken line, timed against the assembled video.
@@ -166,6 +179,11 @@ export function buildCaptions(scenes: Scene[], transcripts: SceneTranscript[]): 
 
     const spoken = scene.frames.filter((f) => f.dialogue).map((f) => f.dialogue!);
     const scriptLines = spoken.map((d) => d.line);
+    if (t.failed) {
+      // Keep the timeline honest and leave this scene uncaptioned.
+      offset += t.durationSeconds;
+      continue;
+    }
     if (scriptLines.length === 0) {
       // No scripted dialogue: emit nothing, so hallucinated ASR text cannot leak in.
       offset += t.durationSeconds;

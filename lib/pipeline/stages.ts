@@ -1,4 +1,4 @@
-import { writeFile, mkdir, stat } from "node:fs/promises";
+import { writeFile, mkdir, stat, readFile } from "node:fs/promises";
 import path from "node:path";
 import { artifact, ensureProjectDirs, safeSceneId } from "../paths";
 import { db, uid, recordCost, projectSpendUsd, getNote, reserveSpend, releaseSpend, setProgress } from "../db";
@@ -467,15 +467,61 @@ export async function runCaptions(opts: {
       continue;
     }
 
-    opts.log(`  transcribing scene ${scene.id}...`);
-    const wav = path.join(artifact.transcripts(opts.projectId), `${safeSceneId(scene.id)}.wav`);
-    await extractAudio(clip, wav);
-    const url = await uploadForTranscription(wav, opts.log);
-    const rawWords = await transcribe({ audioUrl: url, onLog: opts.log });
+    // Cached per scene, keyed on the clip that produced it. A captions run is twenty
+    // network calls against a service that cold-starts, and re-running it used to
+    // re-pay for and re-wait on every scene that had already succeeded.
+    const cachePath = path.join(artifact.transcripts(opts.projectId), `${safeSceneId(scene.id)}.words.json`);
+    const clipStat = await stat(clip);
+    let rawWords: Awaited<ReturnType<typeof transcribe>> | null = null;
+    if (await exists(cachePath)) {
+      try {
+        const cached = JSON.parse(await readFile(cachePath, "utf8")) as {
+          clipMtimeMs: number; clipBytes: number; words: Awaited<ReturnType<typeof transcribe>>;
+        };
+        // Only trust it for the same clip: a re-roll changes the audio entirely.
+        if (cached.clipBytes === clipStat.size && cached.clipMtimeMs === Math.floor(clipStat.mtimeMs)) {
+          rawWords = cached.words;
+          opts.log(`  scene ${scene.id}: reusing the transcript already on disk`);
+        }
+      } catch {
+        // A corrupt cache is not worth failing over; transcribe again.
+      }
+    }
+
+    let failed = false;
+    if (!rawWords) {
+      opts.log(`  transcribing scene ${scene.id}...`);
+      try {
+        const wav = path.join(artifact.transcripts(opts.projectId), `${safeSceneId(scene.id)}.wav`);
+        await extractAudio(clip, wav);
+        const url = await uploadForTranscription(wav, opts.log);
+        rawWords = await transcribe({ audioUrl: url, onLog: opts.log });
+        await writeFile(
+          cachePath,
+          JSON.stringify({ clipMtimeMs: Math.floor(clipStat.mtimeMs), clipBytes: clipStat.size, words: rawWords })
+        );
+        recordCost({
+          projectId: opts.projectId,
+          provider: "replicate",
+          operation: "whisper",
+          sceneId: scene.id,
+          usd: 0.002,
+        });
+      } catch (err) {
+        // One scene's transcription must not discard the whole run. This is not
+        // hypothetical: a single cold start aborted a 20-scene run at scene 17 and
+        // threw away sixteen transcriptions that had already succeeded.
+        failed = true;
+        rawWords = [];
+        opts.log(`  WARNING: scene ${scene.id} could not be transcribed (${(err as Error).message.slice(0, 160)})`);
+        opts.log(`    it will have no subtitles; the rest of the ad is unaffected. Re-run captions to retry just this scene.`);
+      }
+    }
+
     // The model pins the first word of every audio file to 0.00; each clip is
     // transcribed on its own, so without this every scene's captions lead its audio.
     const onset = await audioOnset(clip);
-    const words = repairLeadingWordTiming(rawWords, onset);
+    const words = failed ? [] : repairLeadingWordTiming(rawWords, onset);
     if (words[0] && rawWords[0] && words[0].start !== rawWords[0].start) {
       opts.log(
         `    first word "${rawWords[0].word}" reported at ${rawWords[0].start.toFixed(2)}s, ` +
@@ -483,14 +529,7 @@ export async function runCaptions(opts: {
       );
     }
     onsets.push({ sceneId: scene.id, onsetSeconds: onset });
-    recordCost({
-      projectId: opts.projectId,
-      provider: "replicate",
-      operation: "whisper",
-      sceneId: scene.id,
-      usd: 0.002,
-    });
-    transcripts.push({ sceneId: scene.id, durationSeconds: duration, words });
+    transcripts.push({ sceneId: scene.id, durationSeconds: duration, words, failed });
     if (opts.jobId) setProgress(opts.jobId, "transcribing", ++transcribed, needTranscribe.length);
   }
 
@@ -524,7 +563,20 @@ export async function runCaptions(opts: {
     ...t,
     onsetSeconds: onsets.find((o) => o.sceneId === t.sceneId)?.onsetSeconds ?? null,
   }));
-  const findings = [...coverageFindings(result.coverage), ...timingFindings(timed)];
+  // A scene that could not be transcribed has no cues at all, which is invisible in a
+  // 200-cue file - so it is reported rather than left for someone to notice.
+  const untranscribed = transcripts
+    .filter((t) => t.failed)
+    .map((t) => ({
+      blocking: false,
+      category: "captions-missing",
+      subject: `scene ${t.sceneId}`,
+      detail:
+        `This scene has no subtitles: transcription failed for it. The rest of the ad is ` +
+        `correctly timed. Re-run captions to retry just this scene - the others are cached.`,
+    }));
+
+  const findings = [...coverageFindings(result.coverage), ...timingFindings(timed), ...untranscribed];
   const early = findings.filter((f) => f.category === "caption-timing");
   if (early.length) {
     opts.log(`  WARNING: ${early.length} scene(s) still have subtitles ahead of the audio:`);

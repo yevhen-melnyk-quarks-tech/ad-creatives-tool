@@ -242,7 +242,10 @@ export async function transcribe(opts: {
     input: { audio: opts.audioUrl, timestamp: "word", batch_size: 24 },
     onLog: opts.onLog,
     pollSeconds: 5,
-    maxPolls: 90,
+    // 25 minutes. Whisper is cheap but cold-starts unpredictably, and this budget was
+    // 7.5 minutes - short enough that one cold start aborted a whole captions run and
+    // discarded the transcriptions already paid for. Waiting costs nothing here.
+    maxPolls: 300,
   });
 
   // This model returns `chunks: [{ timestamp: [start, end], text }]`. A trailing
