@@ -1,7 +1,7 @@
 import { db, uid, recordCost, recoverOrphanedJobs, setProgress } from "../db";
 import { mapWithConcurrency } from "../util/concurrency";
-import { setUsageSink } from "../models/usageTracker";
-import { estimateGeminiUsd } from "../models/pricing";
+import { withUsageSink } from "../models/usageTracker";
+import { estimateGeminiUsd, type Usage } from "../models/pricing";
 import { ScenarioSchema, type Scenario } from "../pipeline/types";
 import { runCharacterCard, runStoryboard, runSceneVideo, runCaptions, runAssembly, captionsAreStale } from "../pipeline/stages";
 import { offloadDeliverables } from "../storage/deliverables";
@@ -12,17 +12,40 @@ import { humanBytes } from "../paths";
  *
  * A single container with one writer does not need Redis or an external queue, and
  * adding one would be a second thing to operate for no benefit. Jobs are rows; this
- * loop claims them one at a time. Long-running work (a video generation is ~150s, a
- * full assembly several minutes) lives here rather than in a request handler, which
- * is precisely why this tool cannot be a set of serverless functions.
+ * loop claims them. Long-running work (a video generation is ~150s, a full assembly
+ * several minutes) lives here rather than in a request handler, which is precisely
+ * why this tool cannot be a set of serverless functions.
+ *
+ * Concurrency is capped PER PROJECT, not as a raw count of simultaneous jobs: at
+ * most one running job per project, up to MAX_CONCURRENT_PROJECTS different
+ * projects at once. That is what "a motion designer working on 2-3 projects in
+ * parallel" actually needs, and it is what keeps every existing per-project
+ * invariant true without touching it — version allocation
+ * (lib/pipeline/versions.ts), the canonical file a job writes to, and the budget
+ * guard (lib/db.ts's reserveSpend, already keyed per project) all already assume
+ * "at most one job per project at a time," and that stays true here.
+ *
+ * `assemble` gets its own, tighter cap regardless of the project cap: it is the one
+ * job kind that does real local compute (an ffmpeg encode measured at 241 MB peak,
+ * memory-capped already — see lib/media/assemble.ts's ENCODER_LIMITS), where every
+ * other kind is just waiting on a Gemini/Replicate response with negligible local
+ * memory. Three concurrent assemblies would approach 950 MB against this
+ * container's 1 GB ceiling; three concurrent image/video generations would not.
  */
 
-// Bounded concurrency for bulk runs. Sequential generation was the dominant cost of a
-// run: twenty clips at ~110s each is over half an hour of waiting. Both providers
+// Bounded concurrency for bulk runs WITHIN one job (e.g. "generate all storyboards"
+// rendering several scenes at once). Sequential generation was the dominant cost of
+// a run: twenty clips at ~110s each is over half an hour of waiting. Both providers
 // rate-limit, so these are caps rather than "as many as there are scenes", and
 // Replicate queues anything over its own per-account limit rather than erroring.
 const CONCURRENCY_IMAGE = Number(process.env.CONCURRENCY_IMAGE ?? 3);
 const CONCURRENCY_VIDEO = Number(process.env.CONCURRENCY_VIDEO ?? 3);
+
+// Bounded concurrency ACROSS projects — see the module comment above for why this
+// is capped per-project rather than as a flat job count, and why assemble is capped
+// separately and more tightly.
+export const MAX_CONCURRENT_PROJECTS = Number(process.env.MAX_CONCURRENT_PROJECTS ?? 3);
+export const MAX_CONCURRENT_ASSEMBLE = Number(process.env.MAX_CONCURRENT_ASSEMBLE ?? 1);
 
 export type JobKind =
   | "character_card"
@@ -48,9 +71,15 @@ export type JobKind =
  * an actual singleton instead of one only within a single module instance.
  */
 declare global {
-  var __adCreativesWorker: { running: boolean; timer: NodeJS.Timeout | null } | undefined;
+  var __adCreativesWorker:
+    | { timer: NodeJS.Timeout | null; runningProjects: Set<string>; runningAssembleCount: number }
+    | undefined;
 }
-const state = (globalThis.__adCreativesWorker ??= { running: false, timer: null });
+const state = (globalThis.__adCreativesWorker ??= {
+  timer: null,
+  runningProjects: new Set<string>(),
+  runningAssembleCount: 0,
+});
 
 export function enqueue(projectId: string, kind: JobKind, payload: Record<string, unknown> = {}): string {
   const id = uid();
@@ -92,13 +121,25 @@ function appendProgress(jobId: string, line: string) {
     .run(line, jobId);
 }
 
+type JobRow = { id: string; project_id: string; kind: JobKind; payload: string };
+
 async function tick() {
-  if (state.running) return;
-  const job = db()
-    .prepare(`SELECT * FROM jobs WHERE status = 'queued' ORDER BY created_at LIMIT 1`)
-    .get() as
-    | { id: string; project_id: string; kind: JobKind; payload: string }
-    | undefined;
+  if (state.runningProjects.size >= MAX_CONCURRENT_PROJECTS) return;
+
+  // Oldest-first, and skip anything whose project already has a job in flight in
+  // THIS process (one job per project, always — see the module comment) or whose
+  // kind is 'assemble' with the assemble slots already full. Loaded in full rather
+  // than queried with a LIMIT 1 + OFFSET scan, since the queue depth here is always
+  // small (human-paced job submission, not a high-throughput system).
+  const candidates = db()
+    .prepare(`SELECT * FROM jobs WHERE status = 'queued' ORDER BY created_at`)
+    .all() as JobRow[];
+
+  const job = candidates.find(
+    (j) =>
+      !state.runningProjects.has(j.project_id) &&
+      (j.kind !== "assemble" || state.runningAssembleCount < MAX_CONCURRENT_ASSEMBLE)
+  );
   if (!job) return;
 
   // The atomic part: `AND status='queued'` in the WHERE clause, not a separate check.
@@ -113,11 +154,6 @@ async function tick() {
   // Confirmed unsafe without this guard by interleaving the four statements by hand
   // (two SELECTs, both seeing 'queued', then two unconditional UPDATEs) — both
   // succeeded. With the guard added, the same interleaving leaves exactly one winner.
-  // A live two-process test could not force the actual race on demand (the window is
-  // a single synchronous SQLite call wide, far shorter than the ~1s poll interval), but
-  // this incident's log — a step logged twice, then a whole extra pass re-entered
-  // after the job had already finished, uploaded its deliverables and recorded a QA
-  // verdict — is what it looks like when the window gets hit for real.
   const claim = db()
     .prepare(
       `UPDATE jobs SET status='running', started_at=datetime('now'), last_seen_at=datetime('now'),
@@ -126,15 +162,28 @@ async function tick() {
         WHERE id = ? AND status = 'queued'`
     )
     .run(job.id);
-  if (claim.changes === 0) return; // someone else claimed it between our SELECT and UPDATE
+  if (claim.changes === 0) return; // someone else claimed it between our SELECT and UPDATE; next tick tries again
 
-  state.running = true;
+  state.runningProjects.add(job.project_id);
+  if (job.kind === "assemble") state.runningAssembleCount++;
+
+  // Deliberately NOT awaited: awaiting here would serialize every job again, exactly
+  // the thing this rewrite exists to remove. tick() returns immediately so the next
+  // 1s-later tick can claim into another open project slot while this one runs.
+  void runClaimedJob(job).finally(() => {
+    state.runningProjects.delete(job.project_id);
+    if (job.kind === "assemble") state.runningAssembleCount--;
+  });
+}
+
+async function runClaimedJob(job: JobRow) {
   const log = (m: string) => appendProgress(job.id, m);
 
   // Bill every Gemini call made anywhere beneath this job — image generation and all
-  // agent calls — to the project that caused it. Safe as ambient state only because
-  // jobs are strictly serialized; see lib/models/usageTracker.ts.
-  setUsageSink((usage, operation) => {
+  // agent calls — to the project that caused it. Scoped to this call's async context
+  // via AsyncLocalStorage (lib/models/usageTracker.ts), not ambient global state, so
+  // concurrent jobs for different projects cannot cross-attribute each other's cost.
+  const usageSink = (usage: Usage, operation: string) => {
     const usd = estimateGeminiUsd(usage);
     if (usd <= 0 && usage.images === 0) return;
     recordCost({
@@ -144,10 +193,10 @@ async function tick() {
       usd,
       detail: `${usage.images} image(s), ${usage.promptTokens} in / ${usage.outputTokens} out tokens`,
     });
-  });
+  };
 
   try {
-    await execute(job.id, job.project_id, job.kind, JSON.parse(job.payload), log);
+    await withUsageSink(usageSink, () => execute(job.id, job.project_id, job.kind, JSON.parse(job.payload), log));
     db().prepare(`UPDATE jobs SET status='done', finished_at=datetime('now') WHERE id = ?`).run(job.id);
   } catch (err) {
     const msg = (err as Error).message;
@@ -158,8 +207,6 @@ async function tick() {
   } finally {
     activeScenes.delete(job.id);
     db().prepare(`UPDATE jobs SET active_scene = NULL WHERE id = ?`).run(job.id);
-    setUsageSink(null);
-    state.running = false;
   }
 }
 

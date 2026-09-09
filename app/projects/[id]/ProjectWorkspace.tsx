@@ -81,6 +81,7 @@ export default function ProjectWorkspace(props: {
   const [versions, setVersions] = useState<Version[]>([]);
   const [deliverables, setDeliverables] = useState<Deliverable[]>([]);
   const [storageConfigured, setStorageConfigured] = useState(false);
+  const [queue, setQueue] = useState<{ busy: number; max: number } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [dismissedJobId, setDismissedJobId] = useState<string | null>(null);
   const [briefOpen, setBriefOpen] = useState(!scenario);
@@ -107,6 +108,7 @@ export default function ProjectWorkspace(props: {
     setVersions(versionRes.versions ?? []);
     setDeliverables(detail.deliverables ?? []);
     setStorageConfigured(Boolean(detail.storageConfigured));
+    setQueue(detail.queue ?? null);
     setHasLoaded(true);
   }, [projectId]);
 
@@ -269,6 +271,19 @@ export default function ProjectWorkspace(props: {
   const cardApproved = card?.approved === 1;
   const approvedSheets = artifacts.filter((a) => a.kind === "storyboard" && a.approved === 1).length;
 
+  /**
+   * Character card has no scene concept, so this is a dedicated one-liner rather
+   * than reusing `sceneJobState` (whose "no sceneId in payload yet" branch means
+   * something different — a bulk job not yet reached this scene — which doesn't
+   * apply to a job kind that is never scene-scoped in the first place).
+   */
+  const cardJobState = (): "generating" | "queued" | null => {
+    if (runningJob?.kind === "character_card") return "generating";
+    if (queuedJobs.some((j) => j.kind === "character_card")) return "queued";
+    if (busy === "character_card") return "queued";
+    return null;
+  };
+
   /** "generating" if the running job is on this scene; "queued" if one is waiting for it. */
   const sceneJobState = (sceneId: string, kinds: string[]): "generating" | "queued" | null => {
     if (runningJob && kinds.includes(runningJob.kind)) {
@@ -426,7 +441,7 @@ export default function ProjectWorkspace(props: {
         )}
       </section>
 
-      {activeJob && <RunningBanner job={activeJob} scenes={activeScenesOf(activeJob)} />}
+      {activeJob && <RunningBanner job={activeJob} scenes={activeScenesOf(activeJob)} queue={queue} />}
       {notice && (
         <p className="sticky top-0 z-20 mb-3 rounded-md border border-info-dot bg-info-bg p-3 text-sm text-info-ink">
           {notice}
@@ -444,41 +459,75 @@ export default function ProjectWorkspace(props: {
         <div className={hasLoaded ? "" : "opacity-50 transition-opacity"}>
           {/* Step 1 — character card */}
           <Step n={1} title="Character card">
-            <div className="flex flex-wrap items-start gap-4">
-              {card ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={fileUrl(card.file_path, card.attempt)} alt="Character card" className="w-72 rounded border border-line" />
-              ) : (
-                <div className="h-40 w-72 animate-pulse rounded bg-surface-sunken" />
-              )}
-              <div className="flex-1 space-y-2">
-                <Verdict report={qaFor("character_card")?.report} />
-                <div className="flex flex-wrap gap-2">
-                  <Btn onClick={() => startJob("character_card")} busy={busy === "character_card"}>
-                    {card ? "Regenerate" : "Generate"}
-                  </Btn>
-                  {card && (
-                    <Btn variant={cardApproved ? "muted" : "primary"} onClick={() => approve("character_card", null, !cardApproved)}>
-                      {cardApproved ? "Approved ✓" : "Approve"}
-                    </Btn>
-                  )}
+            {(() => {
+              const cardState = cardJobState();
+              return (
+                <div className="flex flex-wrap items-start gap-4">
+                  <div className="relative w-72">
+                    {card ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={fileUrl(card.file_path, card.attempt)}
+                        alt="Character card"
+                        className={`w-72 rounded border border-line transition-opacity ${cardState ? "opacity-40" : ""}`}
+                      />
+                    ) : (
+                      <div className="h-40 w-72 animate-pulse rounded bg-surface-sunken" />
+                    )}
+                    {/* Shimmer over the EXISTING card while a new one is coming, rather
+                        than leaving the old image sitting there looking untouched — the
+                        motion designer's own report was that a regeneration in flight
+                        was indistinguishable from one that had silently done nothing. */}
+                    {cardState && card && (
+                      <div className="absolute inset-0 animate-pulse rounded bg-surface-sunken/60" />
+                    )}
+                  </div>
+                  <div className="flex-1 space-y-2">
+                    <p className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                      <span>Character card</span>
+                      {card && card.attempt > 1 && (
+                        <span className="text-xs font-normal text-ink-subtle">attempt {card.attempt}</span>
+                      )}
+                      <JobBadge state={cardState} />
+                    </p>
+                    <Verdict report={qaFor("character_card")?.report} />
+                    <div className="flex flex-wrap gap-2">
+                      <Btn
+                        onClick={() => startJob("character_card")}
+                        busy={busy === "character_card" || cardState !== null}
+                        disabled={cardState !== null}
+                      >
+                        {card ? "Regenerate" : "Generate"}
+                      </Btn>
+                      {card && (
+                        <Btn
+                          variant={cardApproved ? "muted" : "primary"}
+                          onClick={() => approve("character_card", null, !cardApproved)}
+                          disabled={cardState !== null}
+                        >
+                          {cardApproved ? "Approved ✓" : "Approve"}
+                        </Btn>
+                      )}
+                    </div>
+                    <NoteBox
+                      initial={noteFor("character_card", null)}
+                      label={card ? "Re-roll with note" : "Generate with note"}
+                      busy={busy === "character_card" || cardState !== null}
+                      disabled={cardState !== null}
+                      onRun={(note) => startJob("character_card", undefined, note)}
+                      onClear={() => saveNote("character_card", null, "")}
+                    />
+                    <VersionStrip
+                      projectId={projectId}
+                      kind="character_card"
+                      sceneId={null}
+                      takes={versionsFor("character_card", null)}
+                      onChanged={refresh}
+                    />
+                  </div>
                 </div>
-                <NoteBox
-                  initial={noteFor("character_card", null)}
-                  label={card ? "Re-roll with note" : "Generate with note"}
-                  busy={busy === "character_card"}
-                  onRun={(note) => startJob("character_card", undefined, note)}
-                  onClear={() => saveNote("character_card", null, "")}
-                />
-                <VersionStrip
-                  projectId={projectId}
-                  kind="character_card"
-                  sceneId={null}
-                  takes={versionsFor("character_card", null)}
-                  onChanged={refresh}
-                />
-              </div>
-            </div>
+              );
+            })()}
           </Step>
 
           {/* Step 2 — storyboards */}
@@ -907,12 +956,33 @@ function NoteBox({
  * had done nothing. It shows the phase, a count where the total is knowable, and the
  * most recent log line, which is the part that actually tells you the run is alive.
  */
-function RunningBanner({ job, scenes }: { job: Job; scenes: string[] }) {
+function RunningBanner({
+  job,
+  scenes,
+  queue,
+}: {
+  job: Job;
+  scenes: string[];
+  /** System-wide concurrency snapshot: how many of the worker's project slots are
+   * busy right now, out of the max. Lets a queued job say WHY it's waiting instead
+   * of showing a bare "queued" that looks identical to broken — see PROJECT.md. */
+  queue: { busy: number; max: number } | null;
+}) {
   const lines = (job.progress ?? "").trimEnd().split("\n").filter(Boolean);
   const last = lines[lines.length - 1] ?? "starting…";
   const step = job.progress_step;
   const total = job.progress_total;
   const pct = step !== null && total !== null && total > 0 ? Math.round((step / total) * 100) : null;
+
+  // All slots full explains the wait; a free slot with the job still queued is just
+  // the ≤1s gap before the next poll claims it — worth a lighter phrasing than
+  // implying a real wait when there probably isn't one.
+  const queuedLabel =
+    job.status !== "queued"
+      ? null
+      : queue && queue.busy >= queue.max
+        ? `queued — waiting for a slot (${queue.busy}/${queue.max} projects busy)`
+        : "queued — starting shortly";
 
   return (
     <div className="sticky top-0 z-20 -mx-8 mb-6 border-b border-line bg-surface/95 px-8 py-3 backdrop-blur">
@@ -920,7 +990,7 @@ function RunningBanner({ job, scenes }: { job: Job; scenes: string[] }) {
         <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-info-dot" />
         <span className="font-medium">{KIND_LABEL[job.kind] ?? job.kind}</span>
         <span className="text-xs text-ink-subtle">
-          {job.status === "queued" ? "queued" : job.progress_label ?? "running"}
+          {queuedLabel ?? job.progress_label ?? "running"}
           {pct !== null && ` · ${step}/${total} (${pct}%)`}
           {scenes.length > 0 && ` · scene ${scenes.join(", ")}`}
         </span>

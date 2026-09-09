@@ -75,7 +75,7 @@ export type RepairOutcome<T> = {
   accepted: boolean;
   /** Additions applied across all attempts, for surfacing in the UI. */
   appliedAdditions: string[];
-  stoppedBy?: "max-attempts" | "budget" | "no-progress";
+  stoppedBy?: "max-attempts" | "budget" | "no-progress" | "generate-failed";
 };
 
 /**
@@ -126,6 +126,7 @@ export async function repairLoop<T>(opts: {
   }
   let lastResult!: T;
   let lastReport!: CriticReport;
+  let lastGenerateError: string | undefined;
   let stoppedBy: RepairOutcome<T>["stoppedBy"];
   let attemptsMade = 0;
 
@@ -145,7 +146,31 @@ export async function repairLoop<T>(opts: {
 
     attemptsMade = attempt;
     opts.onLog?.(`  ${opts.stage}${opts.sceneId ? ` ${opts.sceneId}` : ""}: attempt ${attempt}/${opts.maxAttempts}`);
-    lastResult = await opts.generate(prompt, attempt);
+
+    // A thrown generate() must not abort every remaining attempt. It used to: this
+    // call had no try/catch, so a single empty response (Gemini's image model
+    // occasionally returns text with no inlineData part, no content-policy block
+    // involved) failed the whole job on attempt 1 regardless of maxAttempts — a
+    // real incident, not a hypothetical: a character-card re-roll failed exactly
+    // this way with MAX_ATTEMPTS_IMAGE=3 configured and never got a second try.
+    // There is nothing here for the repair planner to diagnose (it reasons about
+    // critic findings, and there is no critique to run on a result that does not
+    // exist), so a retry just resubmits the same prompt rather than composing a
+    // new one — these failures look nondeterministic, not something rephrasing fixes.
+    try {
+      lastResult = await opts.generate(prompt, attempt);
+    } catch (err) {
+      const msg = (err as Error).message;
+      lastGenerateError = msg;
+      if (attempt === opts.maxAttempts) {
+        stoppedBy = "generate-failed";
+        opts.onLog?.(`  attempt ${attempt} failed to produce a result (${msg}) — out of attempts`);
+        break;
+      }
+      opts.onLog?.(`  attempt ${attempt} failed to produce a result (${msg}) — retrying`);
+      continue;
+    }
+
     lastReport = await opts.critique(lastResult, prompt, attempt);
 
     if (lastReport.verdict === "PASS") {
@@ -218,7 +243,9 @@ export async function repairLoop<T>(opts: {
         summary:
           stoppedBy === "budget"
             ? "Nothing was generated: the project budget guard stopped this run before the first attempt. Raise PROJECT_BUDGET_USD to continue."
-            : "Nothing was generated and no review ran.",
+            : stoppedBy === "generate-failed"
+              ? `Every attempt failed to produce a result to review (last error: ${lastGenerateError}). This looks like a transient provider issue — try again.`
+              : "Nothing was generated and no review ran.",
         findings: [],
       } satisfies CriticReport),
     accepted: false,

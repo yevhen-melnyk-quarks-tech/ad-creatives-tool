@@ -221,6 +221,17 @@ export function recordCost(row: {
 export const projectSpendUsd = (projectId: string): number =>
   (db().prepare(`SELECT COALESCE(SUM(usd), 0) AS t FROM costs WHERE project_id = ?`).get(projectId) as { t: number }).t;
 
+/**
+ * How many DIFFERENT projects currently have a running job, system-wide.
+ *
+ * What a project's own "queued" status actually means now that the worker runs
+ * several projects concurrently (see lib/jobs/worker.ts): not "something is
+ * broken", but "every concurrent slot is currently busy." Surfaced to the UI so a
+ * queued job reads as a wait for capacity rather than a hang.
+ */
+export const runningProjectCount = (): number =>
+  (db().prepare(`SELECT COUNT(DISTINCT project_id) AS n FROM jobs WHERE status='running'`).get() as { n: number }).n;
+
 /** Operator correction for one artifact, or null. */
 export function getNote(projectId: string, kind: string, sceneId: string | null): string | null {
   const row = db()

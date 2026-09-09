@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { db, projectSpendUsd, recordCost, listNotes } from "@/lib/db";
-import { ensureWorker } from "@/lib/jobs/worker";
+import { db, projectSpendUsd, recordCost, listNotes, runningProjectCount } from "@/lib/db";
+import { ensureWorker, MAX_CONCURRENT_PROJECTS } from "@/lib/jobs/worker";
 import { projectDir, dirSizeBytes, humanBytes, pruneIntermediates } from "@/lib/paths";
 import { ScenarioSchema } from "@/lib/pipeline/types";
 import { normalizeScenario } from "@/lib/pipeline/normalize";
@@ -80,6 +80,9 @@ export async function GET(_req: Request, { params }: Ctx) {
     resolution480IsEstimate: SEEDANCE_480_RATE_IS_ESTIMATE,
     diskBytes: bytes,
     diskHuman: humanBytes(bytes),
+    // How many of the worker's concurrent project slots are currently busy, so a
+    // queued job on this project reads as "waiting for capacity" rather than "stuck."
+    queue: { busy: runningProjectCount(), max: MAX_CONCURRENT_PROJECTS },
     // Where each finished file currently is. The links do not change either way — the
     // file route redirects — but the interface says so, because "is this still on the
     // box that could fill up" is a question worth being able to answer at a glance.
