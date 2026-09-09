@@ -176,21 +176,58 @@ export async function generateVideo(opts: {
 
   const resolution: VideoResolution = opts.resolution ?? "480p";
 
-  const reference_images: string[] = [];
-  for (const p of opts.referencePaths) reference_images.push(await uploadFile(p, opts.onLog));
+  /**
+   * One documented incident: Seedance failed a prediction with "Error processing
+   * image /tmp/tmp6hdcf9i3download for aspect ratio validation: unknown file
+   * extension" — a temp path with NO extension at all. Traced this as far as it can
+   * be traced from here: our own upload carries the right one end to end (verified
+   * live against Replicate's Files API — the served URL keeps the `.jpg` we name the
+   * multipart part with), so whatever stripped it happened after Replicate received
+   * a well-formed request, somewhere in Bytedance's own file handling. Not something
+   * this code can fix at the source — but it looks environmental rather than caused
+   * by anything in the request, so it is worth one retry with fresh uploads before
+   * giving up.
+   *
+   * Distinct from the QA repair loop this pairs with: that one is gone for video by
+   * design (auto-regeneration on a critic's aesthetic verdict is the expensive
+   * failure mode). This is a transport-level retry for a prediction that never
+   * produced a video to critique at all, the same category as the HTTP-level
+   * retries `fetchRetry` already does for a dropped connection - just one layer
+   * deeper, because here the request succeeded and the provider's own processing
+   * failed.
+   */
+  const TRANSIENT_FAILURE = /aspect ratio validation|unknown file extension/i;
+  const MAX_GENERATION_ATTEMPTS = 3;
 
-  const final = await runPrediction({
-    model: VIDEO_MODEL,
-    input: {
-      prompt: opts.prompt,
-      reference_images,
-      duration: opts.durationSeconds,
-      resolution,
-      aspect_ratio: "9:16",
-      generate_audio: true,
-    },
-    onLog: opts.onLog,
-  });
+  let final: Prediction | undefined;
+  for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
+    const reference_images: string[] = [];
+    for (const p of opts.referencePaths) reference_images.push(await uploadFile(p, opts.onLog));
+
+    try {
+      final = await runPrediction({
+        model: VIDEO_MODEL,
+        input: {
+          prompt: opts.prompt,
+          reference_images,
+          duration: opts.durationSeconds,
+          resolution,
+          aspect_ratio: "9:16",
+          generate_audio: true,
+        },
+        onLog: opts.onLog,
+      });
+      break;
+    } catch (err) {
+      const message = (err as Error).message;
+      if (attempt === MAX_GENERATION_ATTEMPTS || !TRANSIENT_FAILURE.test(message)) throw err;
+      opts.onLog?.(
+        `  looks like a transient provider-side failure (attempt ${attempt}/${MAX_GENERATION_ATTEMPTS}), retrying with a fresh upload: ${message.slice(0, 200)}`
+      );
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
+  if (!final) throw new Error("generateVideo: exhausted retries without a result"); // unreachable — every exit above either returns, breaks with `final` set, or throws
 
   const outputUrl = Array.isArray(final.output) ? (final.output[0] as string) : (final.output as string);
   const videoRes = await fetchRetry(outputUrl, {}, 4, "download video", opts.onLog);
