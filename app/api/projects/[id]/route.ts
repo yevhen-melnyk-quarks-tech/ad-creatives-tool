@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { db, projectSpendUsd, recordCost, listNotes } from "@/lib/db";
+import { ensureWorker } from "@/lib/jobs/worker";
 import { projectDir, dirSizeBytes, humanBytes, pruneIntermediates } from "@/lib/paths";
 import { ScenarioSchema } from "@/lib/pipeline/types";
 import { normalizeScenario } from "@/lib/pipeline/normalize";
@@ -15,6 +16,14 @@ export const dynamic = "force-dynamic";
 type Ctx = { params: Promise<{ id: string }> };
 
 export async function GET(_req: Request, { params }: Ctx) {
+  // The project workspace polls this route every 4s for as long as it is open, which
+  // makes it the most reliable place to guarantee the worker survives a redeploy.
+  // ensureWorker() previously lived only on the home page and the project-list route
+  // — neither of which a user sitting on an already-open project page ever hits, so a
+  // job left queued right before a deploy could sit forever until someone happened to
+  // navigate to the project list or submit a brand-new job (enqueue() calls it too).
+  ensureWorker();
+
   const { id } = await params;
   const project = db().prepare(`SELECT * FROM projects WHERE id = ?`).get(id) as
     | Record<string, unknown>
