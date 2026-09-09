@@ -26,6 +26,16 @@ export const artifact = {
   transcriptJson: (id: string) => path.join(projectDir(id), "transcript.json"),
   transcriptSrt: (id: string) => path.join(projectDir(id), "transcript.srt"),
   work: (id: string) => path.join(projectDir(id), "_work"),
+  /**
+   * A fresh, unique scratch directory for one assembly attempt, nested under `_work`.
+   *
+   * The plain `_work` path used to be shared by every attempt for a project, so two
+   * runs racing on it — whatever the cause, two overlapping deploy containers or a
+   * concurrent "prune scratch" click — could delete or overwrite each other's files
+   * mid-render. Each attempt now gets its own subdirectory that only it ever touches,
+   * which closes that whole class of collision regardless of what caused it.
+   */
+  workAttempt: (id: string, attemptId: string) => path.join(projectDir(id), "_work", attemptId),
   diag: (id: string) => path.join(projectDir(id), "_diag"),
   transcripts: (id: string) => path.join(projectDir(id), "_transcripts"),
   versions: (id: string) => path.join(projectDir(id), "_versions"),

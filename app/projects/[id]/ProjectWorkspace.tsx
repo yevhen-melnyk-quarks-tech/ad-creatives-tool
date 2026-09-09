@@ -345,11 +345,16 @@ export default function ProjectWorkspace(props: {
             disk: {disk}{" "}
             <button
               onClick={async () => {
-                await fetch(`/api/projects/${projectId}?mode=intermediates`, { method: "DELETE" });
+                const res = await fetch(`/api/projects/${projectId}?mode=intermediates`, { method: "DELETE" });
+                if (!res.ok) {
+                  const data = await res.json().catch(() => ({}));
+                  setNotice(data.error ?? "Could not prune — try again in a moment.");
+                  setTimeout(() => setNotice(null), 6000);
+                }
                 await refresh();
               }}
               className="ml-1 underline transition-opacity active:opacity-60"
-              title="Delete working and diagnostic files. Keeps clips, takes and the final video."
+              title="Delete working and diagnostic files. Keeps clips, takes and the final video. Refused while a job is running."
             >
               prune scratch
             </button>

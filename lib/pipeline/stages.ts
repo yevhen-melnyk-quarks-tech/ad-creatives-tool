@@ -661,7 +661,10 @@ export async function runAssembly(opts: {
     clipPaths,
     srtPath: artifact.captions(opts.projectId),
     outPath,
-    workDir: artifact.work(opts.projectId),
+    // A fresh, unique scratch directory per attempt (see workAttempt in lib/paths.ts):
+    // no two runs of this job, whatever caused there to be two, can delete or
+    // overwrite each other's intermediate files.
+    workDir: artifact.workAttempt(opts.projectId, uid()),
     disclaimerBold: disclaimer.bold,
     disclaimerRegular: disclaimer.body,
     onLog: opts.log,

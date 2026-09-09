@@ -193,6 +193,22 @@ export async function DELETE(req: Request, { params }: Ctx) {
       { status: 400 }
     );
   }
+
+  // Refused, not raced, while a job is running for this project. This button deletes
+  // _work/_diag/_transcripts outright — exactly what a running job is reading from and
+  // writing to (extracted frames for the critic, a clip's audio mid-transcription, an
+  // in-progress assembly's intermediates) — and it runs as a plain DELETE outside the
+  // job queue, so nothing else already stops it from firing mid-job.
+  const running = db()
+    .prepare(`SELECT kind FROM jobs WHERE project_id=? AND status='running' LIMIT 1`)
+    .get(id) as { kind: string } | undefined;
+  if (running) {
+    return NextResponse.json(
+      { error: `a ${running.kind} job is running for this project — wait for it to finish before pruning` },
+      { status: 409 }
+    );
+  }
+
   await pruneIntermediates(id);
   const bytes = await dirSizeBytes(projectDir(id));
   return NextResponse.json({ ok: true, diskBytes: bytes, diskHuman: humanBytes(bytes) });
