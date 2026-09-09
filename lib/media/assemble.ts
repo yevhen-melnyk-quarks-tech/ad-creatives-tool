@@ -203,17 +203,25 @@ export async function assembleFinal(opts: AssembleOptions): Promise<AssembleResu
     // burning a blank line above it, the body moves up into the bold line's position so
     // the block sits where the reference ad puts it either way.
     const hasBold = Boolean(disclaimerBold.trim());
+    const discBoldSize = px(17);
+    const discRegularSize = px(16);
+    // The gap between the two lines, derived from the font metrics rather than a
+    // second fixed fraction of frame height. It was H*0.027 (52px at H=1920) against
+    // a 26px bold line — a gap 1.7x the font size, closer to a blank line between the
+    // two than a paragraph. 1.2x the taller line's size is a normal tight leading.
+    const discLineGap = Math.round(Math.max(discBoldSize, discRegularSize) * 1.2);
+    const discBaseY = Math.round(H * 0.795);
     const discLines: { file: string; text: string; bold: boolean; y: number }[] = hasBold
       ? [
-          { file: "disc1.txt", text: disclaimerBold, bold: true, y: Math.round(H * 0.795) },
-          { file: "disc2.txt", text: disclaimerRegular, bold: false, y: Math.round(H * 0.822) },
+          { file: "disc1.txt", text: disclaimerBold, bold: true, y: discBaseY },
+          { file: "disc2.txt", text: disclaimerRegular, bold: false, y: discBaseY + discLineGap },
         ]
-      : [{ file: "disc2.txt", text: disclaimerRegular, bold: false, y: Math.round(H * 0.795) }];
+      : [{ file: "disc2.txt", text: disclaimerRegular, bold: false, y: discBaseY }];
 
     for (const l of discLines) await writeFile(path.join(workDir, l.file), l.text, "utf-8");
     const discFilters = discLines.map(
       (l) =>
-        `drawtext=fontfile='${esc(l.bold ? FONT_BOLD : FONT_REG)}':textfile='${esc(path.join(workDir, l.file))}':fontsize=${px(l.bold ? 17 : 16)}:fontcolor=white:x=(w-text_w)/2:y=${l.y}:shadowx=${px(1)}:shadowy=${px(1)}:shadowcolor=black@0.6`
+        `drawtext=fontfile='${esc(l.bold ? FONT_BOLD : FONT_REG)}':textfile='${esc(path.join(workDir, l.file))}':fontsize=${l.bold ? discBoldSize : discRegularSize}:fontcolor=white:x=(w-text_w)/2:y=${l.y}:shadowx=${px(1)}:shadowy=${px(1)}:shadowcolor=black@0.6`
     );
 
     const hasCaptions = await exists(srtPath);
