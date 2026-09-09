@@ -165,6 +165,8 @@ function buildPrompt(rawText: string): string {
     "- If the brief has no versions block, return an empty versions array. Never invent one.",
     "",
     "SCENES:",
+    "- A change of location is always a new scene, even if the brief's own scene numbering does not mark one — never let one scene entry span two settings.",
+    "- A moment where a character learns something important or makes a decision gets its OWN scene, even if the brief's narration runs it straight into what comes before or after — the emotional beat needs room, and the per-scene pacing budget below assumes one turning point per scene, not two competing for the same clip.",
     "- Preserve every dialogue line VERBATIM in its original language and wording — never translate it, never invent a new line, never drop a line, never merge two lines into one.",
     "- Every OTHER field (title, location, action, label, noDialogueSound) must be written in English regardless of what language the brief's narration is in — these drive image and video generation prompts, which require English. Translate the brief's scene descriptions into English; do not translate the dialogue lines themselves.",
     "- `charactersPresent`: list EVERY character VISIBLE in that frame, using the exact names from the character list. Include a character who is on screen but silent. This list is used to lock identity, and a character left out of it is explicitly told not to appear — so omitting the person the shot is about produces a clip starring the wrong character.",
@@ -302,7 +304,7 @@ function hydrate(raw: RawBrief): Omit<BriefParseResult, "usd"> {
     return {
       id: String(sceneIdx + 1),
       title: s.title.trim() || `Scene ${sceneIdx + 1}`,
-      durationSeconds: estimateSceneDuration(frames),
+      durationSeconds: estimateSceneDuration(frames, charactersInScene),
       location: s.location.trim(),
       backgroundCustomers: orNull(s.backgroundCustomers ?? ""),
       screenLock: orNull(s.screenLock ?? ""),

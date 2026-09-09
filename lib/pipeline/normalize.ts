@@ -73,7 +73,7 @@ export function normalizeScenario(scenario: Scenario): { scenario: Scenario; war
     for (const unit of units) {
       const withPacing = unit.pacingOverride
         ? unit
-        : { ...unit, pacingOverride: pacingOverrideFor(unit.frames, unit.durationSeconds) };
+        : { ...unit, pacingOverride: pacingOverrideFor(unit.frames, unit.durationSeconds, unit.charactersInScene) };
 
       // Applied per unit and AFTER splitting, because splitting is what narrows the
       // cast — and that narrowing is where a character referenced by the prose gets
