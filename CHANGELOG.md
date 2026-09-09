@@ -4,6 +4,33 @@ All notable changes to this project are documented here. Format: dated entries,
 newest first, grouped as Added / Changed / Fixed / Removed. Versions track
 `package.json` — bumped by `/document` on every close-out.
 
+## 0.3.0 — 2026-09-09
+
+### Added
+- The worker now runs up to 3 different projects' jobs concurrently instead of
+  one job at a time system-wide — a motion designer can work on 2-3 projects in
+  parallel. `assemble` (the one ffmpeg-heavy job kind) keeps its own tighter cap
+  of 1 concurrent, regardless of the general limit.
+- The running banner explains a queued job's wait ("queued — waiting for a slot
+  (3/3 projects busy)") instead of a bare "queued" that looked identical to stuck.
+- The character card now shows an in-flight badge, a shimmer over the existing
+  image while a new one is coming, and disabled controls while a job is running —
+  matching the treatment storyboards/videos already had.
+
+### Fixed
+- Root cause of "character card regeneration stuck in queued, never starts": the
+  job queue was a single global lane for the entire app, so an unrelated project's
+  stuck job could silently block everything else. Fixed by the concurrency work
+  above, not by patching the symptom.
+- Cost tracking moved from a single global variable to per-job `AsyncLocalStorage`
+  context — required for the concurrency work above; the old approach would have
+  attributed one project's Gemini spend to whichever project's job happened to be
+  running at the moment a call resolved.
+- A thrown error from an image generation call (e.g. Gemini occasionally returning
+  no image part with no content-policy block) used to abort every remaining retry
+  attempt immediately, regardless of `MAX_ATTEMPTS_IMAGE`. Now retries like any
+  other recoverable failure. Affects character cards and storyboards.
+
 ## 0.2.0 — 2026-09-09
 
 ### Fixed
