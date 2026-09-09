@@ -34,8 +34,23 @@ export type JobKind =
   | "assemble"
   | "offload";     // move finished deliverables to object storage
 
-let running = false;
-let timer: NodeJS.Timeout | null = null;
+/**
+ * Shared on `globalThis` rather than a plain module-level variable.
+ *
+ * Defensive hardening, not the fix for the incident below — a plain `let` is only
+ * unsafe against a second poll loop IN THE SAME PROCESS, and testing that directly
+ * (two distinct module instances of this file, each with its own closure, both told
+ * to start) showed no race: better-sqlite3 is synchronous, so one loop's claim
+ * (SELECT then UPDATE, no `await` between them) always finishes before another
+ * timer callback in the same event loop gets a turn. Next.js CAN duplicate a server
+ * module across route bundles, so a second independent loop is a real possibility
+ * worth closing anyway — this is what makes `ensureWorker`'s "already started" guard
+ * an actual singleton instead of one only within a single module instance.
+ */
+declare global {
+  var __adCreativesWorker: { running: boolean; timer: NodeJS.Timeout | null } | undefined;
+}
+const state = (globalThis.__adCreativesWorker ??= { running: false, timer: null });
 
 export function enqueue(projectId: string, kind: JobKind, payload: Record<string, unknown> = {}): string {
   const id = uid();
@@ -47,15 +62,15 @@ export function enqueue(projectId: string, kind: JobKind, payload: Record<string
 }
 
 export function ensureWorker() {
-  if (timer) return;
+  if (state.timer) return;
   // A redeploy or crash leaves jobs stuck in `running`; nothing else would ever pick
   // them up again. Recovered once, at the point the worker first starts.
   const recovered = recoverOrphanedJobs();
   if (recovered > 0) console.log(`[worker] requeued ${recovered} interrupted job(s)`);
   // Poll rather than event-drive: the loop is the only consumer and a 1s tick is
   // irrelevant next to job durations measured in minutes.
-  timer = setInterval(() => void tick(), 1000);
-  if (typeof timer.unref === "function") timer.unref();
+  state.timer = setInterval(() => void tick(), 1000);
+  if (typeof state.timer.unref === "function") state.timer.unref();
 }
 
 /**
@@ -70,14 +85,15 @@ function appendProgress(jobId: string, line: string) {
   db()
     .prepare(
       `UPDATE jobs
-          SET progress = substr(COALESCE(progress, '') || ? || char(10), -40000)
+          SET progress = substr(COALESCE(progress, '') || ? || char(10), -40000),
+              last_seen_at = datetime('now')
         WHERE id = ?`
     )
     .run(line, jobId);
 }
 
 async function tick() {
-  if (running) return;
+  if (state.running) return;
   const job = db()
     .prepare(`SELECT * FROM jobs WHERE status = 'queued' ORDER BY created_at LIMIT 1`)
     .get() as
@@ -85,15 +101,34 @@ async function tick() {
     | undefined;
   if (!job) return;
 
-  running = true;
-  db()
+  // The atomic part: `AND status='queued'` in the WHERE clause, not a separate check.
+  // The SELECT above only finds a CANDIDATE. Two processes sharing this SQLite file —
+  // the old and new container briefly overlapping during a Railway deploy is the
+  // concrete case, and this job's own log carries two "process restarted" recovery
+  // markers proving that happened here — can both select the same 'queued' row before
+  // either writes back. Only one UPDATE can then actually match (SQLite serializes
+  // writes to one file), so the loser's `changes` comes back 0 and must back off,
+  // rather than both proceeding to call `execute()` on the same job.
+  //
+  // Confirmed unsafe without this guard by interleaving the four statements by hand
+  // (two SELECTs, both seeing 'queued', then two unconditional UPDATEs) — both
+  // succeeded. With the guard added, the same interleaving leaves exactly one winner.
+  // A live two-process test could not force the actual race on demand (the window is
+  // a single synchronous SQLite call wide, far shorter than the ~1s poll interval), but
+  // this incident's log — a step logged twice, then a whole extra pass re-entered
+  // after the job had already finished, uploaded its deliverables and recorded a QA
+  // verdict — is what it looks like when the window gets hit for real.
+  const claim = db()
     .prepare(
-      `UPDATE jobs SET status='running', started_at=datetime('now'),
+      `UPDATE jobs SET status='running', started_at=datetime('now'), last_seen_at=datetime('now'),
                        attempts = attempts + 1, active_scene = NULL,
                        progress_step = NULL, progress_total = NULL, progress_label = NULL
-        WHERE id = ?`
+        WHERE id = ? AND status = 'queued'`
     )
     .run(job.id);
+  if (claim.changes === 0) return; // someone else claimed it between our SELECT and UPDATE
+
+  state.running = true;
   const log = (m: string) => appendProgress(job.id, m);
 
   // Bill every Gemini call made anywhere beneath this job — image generation and all
@@ -124,7 +159,7 @@ async function tick() {
     activeScenes.delete(job.id);
     db().prepare(`UPDATE jobs SET active_scene = NULL WHERE id = ?`).run(job.id);
     setUsageSink(null);
-    running = false;
+    state.running = false;
   }
 }
 

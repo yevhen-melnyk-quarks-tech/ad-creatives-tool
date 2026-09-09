@@ -148,6 +148,12 @@ function migrate(d: Database.Database) {
   // build on them and the UI can show what was actually changed.
   addColumnIfMissing(d, "artifacts", "prompt_additions", "TEXT");
 
+  // Last sign of life from whichever process is executing this job — bumped on claim
+  // and on every progress write. What tells `recoverOrphanedJobs` a "running" job is
+  // truly dead (its owner can never touch it again) rather than merely still working,
+  // which `started_at` alone cannot: a job legitimately runs for many minutes.
+  addColumnIfMissing(d, "jobs", "last_seen_at", "TEXT");
+
   // Which scene a bulk job is on right now, so the UI can mark that row as
   // generating instead of only showing one banner at the top of a long page.
   addColumnIfMissing(d, "jobs", "active_scene", "TEXT");
@@ -246,6 +252,28 @@ export const listNotes = (projectId: string) =>
  * Bounded by `attempts`: a job whose work reliably kills the process would otherwise
  * be picked up, crash, and be requeued in an endless loop.
  */
+/**
+ * Reclaims jobs whose owning process is actually gone — not every job that merely
+ * looks "running" the instant this boots.
+ *
+ * Requeuing unconditionally was the other half of a real incident: if the process
+ * that holds a job is still alive (a Railway rolling deploy briefly overlaps the old
+ * and new container on the same volume), the naive version yanks its job back to
+ * 'queued' out from under it. The atomic claim in `tick()` then stops a second
+ * process from ALSO executing it concurrently with the first — but only once it has
+ * already been wrongly reset here, which is one incident too late: the two processes
+ * had already interleaved by the time either wrote anything back.
+ *
+ * `last_seen_at` is the fix: bumped on claim and on every progress write, so a job
+ * that is genuinely still being worked has a recent one, and this only touches rows
+ * silent for longer than any real stage of this pipeline pauses between updates
+ * (video polling logs every ~30s at the widest gap; STALE_AFTER_SECONDS leaves 3x
+ * that as margin). A legitimately dead process's job — the one this exists for —
+ * stops updating `last_seen_at` the moment it dies, so it still gets reclaimed, just
+ * not before it has had a fair chance to prove it is still alive.
+ */
+const STALE_AFTER_SECONDS = 90;
+
 export function recoverOrphanedJobs(maxAttempts = 3): number {
   const res = db()
     .prepare(
@@ -255,9 +283,10 @@ export function recoverOrphanedJobs(maxAttempts = 3): number {
               progress = COALESCE(progress, '') ||
                 CASE WHEN attempts >= ? THEN 'Abandoned: interrupted too many times.' || char(10)
                      ELSE 'Interrupted (process restarted) — requeued to continue.' || char(10) END
-        WHERE status = 'running'`
+        WHERE status = 'running'
+          AND COALESCE(last_seen_at, started_at) < datetime('now', ?)`
     )
-    .run(maxAttempts, maxAttempts, maxAttempts);
+    .run(maxAttempts, maxAttempts, maxAttempts, `-${STALE_AFTER_SECONDS} seconds`);
   return res.changes;
 }
 
@@ -298,6 +327,9 @@ export const projectCommittedUsd = (projectId: string): number =>
  */
 export function setProgress(jobId: string, label: string, step: number, total: number) {
   db()
-    .prepare(`UPDATE jobs SET progress_label=?, progress_step=?, progress_total=? WHERE id=?`)
+    .prepare(
+      `UPDATE jobs SET progress_label=?, progress_step=?, progress_total=?, last_seen_at=datetime('now')
+        WHERE id=?`
+    )
     .run(label, step, total, jobId);
 }
