@@ -29,6 +29,7 @@ export type Version = {
   prompt: string | null;
   verdict: string | null;
   summary: string | null;
+  suggested_note: string | null;
   bytes: number;
   is_current: number;
   created_at: string;
@@ -90,6 +91,22 @@ export function annotateVersion(
         WHERE project_id=? AND kind=? AND scene_id IS ? AND version=?`
     )
     .run(verdict, summary, projectId, kind, sceneId, version);
+}
+
+/**
+ * Attaches the repair agent's diagnosis to a take that failed review, for a human to
+ * read and optionally carry into a manual re-roll's note — see the video generation
+ * stage, which stopped auto-applying this the same way the image stages still do.
+ */
+export function saveSuggestion(
+  projectId: string, kind: string, sceneId: string | null, version: number, note: string
+) {
+  db()
+    .prepare(
+      `UPDATE artifact_versions SET suggested_note=?
+        WHERE project_id=? AND kind=? AND scene_id IS ? AND version=?`
+    )
+    .run(note, projectId, kind, sceneId, version);
 }
 
 /**

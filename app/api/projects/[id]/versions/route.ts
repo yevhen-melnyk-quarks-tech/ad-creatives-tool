@@ -25,6 +25,7 @@ export async function GET(_req: Request, { params }: Ctx) {
     version: v.version,
     verdict: v.verdict,
     summary: v.summary,
+    suggestedNote: v.suggested_note,
     bytes: v.bytes,
     isCurrent: v.is_current === 1,
     createdAt: v.created_at,

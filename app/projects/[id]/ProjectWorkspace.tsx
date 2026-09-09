@@ -25,7 +25,8 @@ type QaRow = { stage: string; scene_id: string | null; verdict: string; report: 
 type Deliverable = { name: string; label: string; remote: boolean; bytes: number | null };
 type Version = {
   kind: string; sceneId: string | null; version: number; verdict: string | null;
-  summary: string | null; bytes: number; isCurrent: boolean; createdAt: string; name: string;
+  summary: string | null; suggestedNote: string | null;
+  bytes: number; isCurrent: boolean; createdAt: string; name: string;
 };
 
 const KIND_LABEL: Record<string, string> = {
@@ -672,6 +673,7 @@ export default function ProjectWorkspace(props: {
                         sceneId={scene.id}
                         takes={versionsFor("video", scene.id)}
                         onChanged={refresh}
+                        onApplySuggestion={(note) => saveNote("video", scene.id, note)}
                       />
                     </div>
                   </div>
@@ -1091,18 +1093,35 @@ function VersionStrip({
   sceneId,
   takes,
   onChanged,
+  onApplySuggestion,
 }: {
   projectId: string;
   kind: string;
   sceneId: string | null;
   takes: Version[];
   onChanged: () => void;
+  /** Video only: copies a take's suggested fix into the operator's own re-roll note. */
+  onApplySuggestion?: (note: string) => void;
 }) {
   const [busyVersion, setBusyVersion] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [applied, setApplied] = useState(false);
 
-  // One take is just the current artifact, already on screen above.
-  if (takes.length < 2) return null;
+  // The current take's suggestion is worth showing even with only one take on record
+  // — that is exactly the moment before a first re-roll, when seeing it matters most.
+  const current = takes.find((t) => t.isCurrent);
+
+  // "Copied ✓" belongs to the take that produced this suggestion, not to this
+  // component instance — a re-roll swaps in a new current take (new suggestion, or
+  // none) without VersionStrip ever unmounting, and without this the button would
+  // keep claiming an old suggestion was applied. Adjusted during render (React's own
+  // pattern for this — see "you might not need an effect") rather than in a
+  // useEffect, which the project's lint config already flags as its own bug class.
+  const [seenVersion, setSeenVersion] = useState(current?.version);
+  if (current?.version !== seenVersion) {
+    setSeenVersion(current?.version);
+    setApplied(false);
+  }
 
   async function promote(version: number) {
     setBusyVersion(version);
@@ -1118,44 +1137,64 @@ function VersionStrip({
   }
 
   return (
-    <div className="rounded border border-line bg-surface-muted p-2">
-      <p className="mb-1.5 text-xs font-medium text-ink-muted">
-        {takes.length} takes kept
-      </p>
-      <ul className="space-y-1">
-        {takes.map((t) => (
-          <li key={t.version} className="flex flex-wrap items-baseline gap-2 text-xs">
-            <span className={t.isCurrent ? "font-medium text-ink" : "text-ink-subtle"}>
-              v{t.version}
-            </span>
-            {t.isCurrent && (
-              <span className="rounded bg-ok-bg px-1.5 py-0.5 text-[10px] font-medium text-ok-ink">in use</span>
-            )}
-            {t.verdict && (
-              <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${VERDICT_STYLE[t.verdict] ?? "bg-surface-raised text-ink-soft"}`}>
-                {t.verdict}
-              </span>
-            )}
-            <a
-              href={`/api/projects/${projectId}/file?name=${encodeURIComponent(t.name)}&download=1`}
-              className="text-ink-subtle underline transition-opacity active:opacity-60 hover:text-ink"
-            >
-              download
-            </a>
-            {!t.isCurrent && (
-              <button
-                onClick={() => promote(t.version)}
-                disabled={busyVersion !== null}
-                className="text-ink-subtle underline transition-opacity active:opacity-60 hover:text-ink disabled:opacity-40"
-              >
-                {busyVersion === t.version ? "switching…" : "use this"}
-              </button>
-            )}
-            <span className="text-ink-subtle">{(t.bytes / 1e6).toFixed(1)} MB</span>
-          </li>
-        ))}
-      </ul>
-      {error && <p className="mt-1.5 text-xs text-danger-ink">{error}</p>}
+    <div className="space-y-2">
+      {onApplySuggestion && current?.suggestedNote && (
+        <div className="rounded border border-warn-line bg-warn-bg p-2 text-xs">
+          <p className="mb-1 font-medium text-warn-ink">Suggested fix</p>
+          <p className="mb-1.5 whitespace-pre-wrap text-warn-ink-soft">{current.suggestedNote}</p>
+          <button
+            onClick={() => {
+              onApplySuggestion(current.suggestedNote!);
+              setApplied(true);
+            }}
+            className="text-warn-ink underline transition-opacity active:opacity-60"
+          >
+            {applied ? "copied into your note ✓" : "copy into my note"}
+          </button>
+        </div>
+      )}
+      {/* One take is just the current artifact, already shown above. */}
+      {takes.length >= 2 && (
+        <div className="rounded border border-line bg-surface-muted p-2">
+          <p className="mb-1.5 text-xs font-medium text-ink-muted">
+            {takes.length} takes kept
+          </p>
+          <ul className="space-y-1">
+            {takes.map((t) => (
+              <li key={t.version} className="flex flex-wrap items-baseline gap-2 text-xs">
+                <span className={t.isCurrent ? "font-medium text-ink" : "text-ink-subtle"}>
+                  v{t.version}
+                </span>
+                {t.isCurrent && (
+                  <span className="rounded bg-ok-bg px-1.5 py-0.5 text-[10px] font-medium text-ok-ink">in use</span>
+                )}
+                {t.verdict && (
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${VERDICT_STYLE[t.verdict] ?? "bg-surface-raised text-ink-soft"}`}>
+                    {t.verdict}
+                  </span>
+                )}
+                <a
+                  href={`/api/projects/${projectId}/file?name=${encodeURIComponent(t.name)}&download=1`}
+                  className="text-ink-subtle underline transition-opacity active:opacity-60 hover:text-ink"
+                >
+                  download
+                </a>
+                {!t.isCurrent && (
+                  <button
+                    onClick={() => promote(t.version)}
+                    disabled={busyVersion !== null}
+                    className="text-ink-subtle underline transition-opacity active:opacity-60 hover:text-ink disabled:opacity-40"
+                  >
+                    {busyVersion === t.version ? "switching…" : "use this"}
+                  </button>
+                )}
+                <span className="text-ink-subtle">{(t.bytes / 1e6).toFixed(1)} MB</span>
+              </li>
+            ))}
+          </ul>
+          {error && <p className="mt-1.5 text-xs text-danger-ink">{error}</p>}
+        </div>
+      )}
     </div>
   );
 }

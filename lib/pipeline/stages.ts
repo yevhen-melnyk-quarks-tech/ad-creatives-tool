@@ -11,10 +11,10 @@ import {
 import { buildContactSheet, extractFrames, extractAudio, durationOf, exists, audioOnset } from "../media/ffmpeg";
 import { assembleFinal } from "../media/assemble";
 import { offloadDeliverables } from "../storage/deliverables";
-import { allocateVersion, recordVersion, annotateVersion, promoteVersion } from "./versions";
+import { allocateVersion, recordVersion, annotateVersion, promoteVersion, saveSuggestion } from "./versions";
 import { checkAssembly } from "../agents/assemblyCheck";
 import { critiqueCharacterCard, critiqueStoryboard, critiqueVideoScene } from "../agents/critics";
-import { repairLoop } from "../agents/repair";
+import { repairLoop, planRepair } from "../agents/repair";
 import { generateCharacterCardPrompt, generateStoryboardPrompt, generateSeedanceVideoPrompt, detectByName } from "./prompts";
 import {
   buildCaptions, coverageFindings, transcriptSrt, repairLeadingWordTiming, timingFindings,
@@ -31,7 +31,11 @@ type Log = (m: string) => void;
 // point of gating storyboards before video: a bad sheet costs cents to re-roll, the
 // clip generated from it costs real money.
 const MAX_ATTEMPTS_IMAGE = Number(process.env.MAX_ATTEMPTS_IMAGE ?? 3);
-const MAX_ATTEMPTS_VIDEO = Number(process.env.MAX_ATTEMPTS_VIDEO ?? 2);
+// Not env-configurable like MAX_ATTEMPTS_IMAGE, deliberately: an automatic second
+// attempt is exactly the cost this fixes. A FAIL or REVIEW still gets a full critic
+// report and a suggested fix (see runSceneVideo) - a human decides whether a re-roll
+// is worth paying for, with or without adopting that suggestion into their own note.
+const MAX_ATTEMPTS_VIDEO = 1;
 const PROJECT_BUDGET_USD = Number(process.env.PROJECT_BUDGET_USD ?? 25);
 // Frames the video critic inspects. More frames make persistence judgeable (a defect
 // in one frame is an artifact, across several it is real) at a few cents per audit.
@@ -411,6 +415,27 @@ export async function runSceneVideo(opts: {
     opts.log(
       `  scene ${opts.scene.id}: stopped by budget guard ($${projectSpendUsd(opts.projectId).toFixed(2)} of $${PROJECT_BUDGET_USD} used)`
     );
+  }
+
+  // Advisory only: video no longer auto-regenerates on a FAIL or REVIEW (see
+  // MAX_ATTEMPTS_VIDEO), so this is the one place that suggestion still gets made —
+  // once, offered to a human rather than spent on a second render automatically.
+  // Skipped when there is nothing to fix: PASS needs no suggestion, and an
+  // UNAVAILABLE or empty-findings REVIEW is exactly what planRepair itself would
+  // have nothing to work with either (repairLoop applies the same skip).
+  if (!outcome.accepted && outcome.finalReport.findings.length > 0 && takeVersion > 0) {
+    try {
+      const plan = await planRepair({ stage: "video", currentPrompt: basePrompt, report: outcome.finalReport, onLog: opts.log });
+      if (plan.promptAdditions.length) {
+        saveSuggestion(opts.projectId, "video", opts.scene.id, takeVersion, plan.promptAdditions.join("\n"));
+        opts.log(`  suggested fix (${plan.confidence}): ${plan.diagnosis}`);
+      }
+    } catch (err) {
+      // Same reasoning as repairLoop's own guard on this call: a failing planner
+      // must not take down a scene whose video generation actually succeeded in
+      // producing something to review.
+      opts.log(`  could not draft a suggested fix (${(err as Error).message})`);
+    }
   }
 
   return { report: outcome.finalReport, accepted: outcome.accepted, path: outPath };

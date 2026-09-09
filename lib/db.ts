@@ -148,6 +148,14 @@ function migrate(d: Database.Database) {
   // build on them and the UI can show what was actually changed.
   addColumnIfMissing(d, "artifacts", "prompt_additions", "TEXT");
 
+  // The repair agent's diagnosis for a take that failed review, offered rather than
+  // auto-applied. Video generation caps at one attempt (auto-regeneration is the
+  // expensive failure mode this exists to remove), so this is what replaces the
+  // loop: the critic still runs and the repair agent still diagnoses what it would
+  // have fixed, but a human decides whether to carry the suggestion into a manual
+  // re-roll's note.
+  addColumnIfMissing(d, "artifact_versions", "suggested_note", "TEXT");
+
   // Last sign of life from whichever process is executing this job — bumped on claim
   // and on every progress write. What tells `recoverOrphanedJobs` a "running" job is
   // truly dead (its owner can never touch it again) rather than merely still working,
