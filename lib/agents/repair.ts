@@ -162,6 +162,15 @@ export async function repairLoop<T>(opts: {
     } catch (err) {
       const msg = (err as Error).message;
       lastGenerateError = msg;
+      // Some failures must never be retried, however many attempts remain — a paid
+      // prediction that timed out is still running on the provider's side, so a
+      // retry buys a second copy of a clip we may already own. The thrower says so
+      // with `retryable: false` rather than this loop knowing about providers.
+      if ((err as { retryable?: boolean }).retryable === false) {
+        stoppedBy = "generate-failed";
+        opts.onLog?.(`  attempt ${attempt} failed and cannot be safely retried (${msg})`);
+        break;
+      }
       if (attempt === opts.maxAttempts) {
         stoppedBy = "generate-failed";
         opts.onLog?.(`  attempt ${attempt} failed to produce a result (${msg}) — out of attempts`);

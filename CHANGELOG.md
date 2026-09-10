@@ -4,6 +4,36 @@ All notable changes to this project are documented here. Format: dated entries,
 newest first, grouped as Added / Changed / Fixed / Removed. Versions track
 `package.json` — bumped by `/document` on every close-out.
 
+## 0.3.1 — 2026-09-10
+
+### Fixed
+- **Videos stopped being generated at all.** Next.js memoizes `fetch` GET requests
+  with the same URL and options, and the worker polls Replicate with exactly such a
+  request every 10 seconds — so every poll after the first replayed the first
+  response and the status could never change. Clips reached the 20-minute poll
+  ceiling and were discarded while Replicate had in fact finished them in 16-127
+  seconds. On 2026-09-10 this burned 3,226 seconds of billed compute across 24
+  successful predictions and saved zero clips. Every provider request now carries an
+  `AbortController` signal, which opts out of that memoization (`cache: "no-store"`
+  does not — it governs a different cache). Same root cause as the "Whisper stall"
+  seen the day before.
+- The job worker now starts from `instrumentation.ts` at server boot rather than
+  from the home page's render. A poll timer created inside a Server Component render
+  inherits that render's memoization for the life of the process, so the worker being
+  a process-wide singleton meant one page load could poison all polling. Route
+  handlers still call `ensureWorker()` as a safety net — they are not memoized.
+- A prediction that outlives its poll budget is no longer thrown away. It is billed
+  either way, so the poll now falls through to a grace period that keeps asking until
+  it finishes, and only then gives up — reporting a `PredictionTimeoutError` carrying
+  the prediction id instead of a misleading "Prediction processing".
+- Billed-but-undelivered renders now appear in the cost ledger (as `-unclaimed`, with
+  the prediction id). They were previously invisible, because the cost was only
+  recorded on the success path — the day above reported $0 of video spend.
+- Re-rolling a scene whose render was lost that way now downloads the already-paid
+  clip instead of paying for a second one, but only when the prompt is byte-identical
+  — an edited note or a changed repair addition still pays for a fresh render rather
+  than silently returning a clip made from different instructions.
+
 ## 0.3.0 — 2026-09-09
 
 ### Added

@@ -1,10 +1,14 @@
 import { writeFile, mkdir, stat, readFile } from "node:fs/promises";
 import path from "node:path";
 import { artifact, ensureProjectDirs, safeSceneId } from "../paths";
-import { db, uid, recordCost, projectSpendUsd, getNote, reserveSpend, releaseSpend, setProgress } from "../db";
+import { createHash } from "node:crypto";
+import {
+  db, uid, recordCost, projectSpendUsd, getNote, reserveSpend, releaseSpend, setProgress,
+  findUnclaimedRender, markRenderReclaimed, UNCLAIMED_SUFFIX,
+} from "../db";
 import { generateImage } from "../models/gemini";
 import {
-  generateVideo, transcribe, uploadForTranscription,
+  generateVideo, recoverVideo, transcribe, uploadForTranscription, PredictionTimeoutError,
   SEEDANCE_USD_PER_SEC_BY_RES, SEEDANCE_PROMPT_LIMIT, VIDEO_RESOLUTIONS,
   type VideoResolution,
 } from "../models/replicate";
@@ -338,11 +342,38 @@ export async function runSceneVideo(opts: {
     trailingInstruction: note,
     onLog: opts.log,
     generate: async (prompt) => {
+      const take = await allocateVersion(opts.projectId, "video", opts.scene.id);
+
+      // Before paying: is this exact render already bought and paid for? A previous
+      // run of this scene may have timed out after Replicate had billed it (see the
+      // catch below). If the prompt is byte-identical, the clip sitting on Replicate
+      // IS the clip we are about to order, so download it instead of ordering another.
+      const promptHash = createHash("sha256").update(prompt).digest("hex").slice(0, 16);
+      const unclaimed = findUnclaimedRender(opts.projectId, opts.scene.id, promptHash);
+      if (unclaimed) {
+        const priorId = unclaimed.detail.split(" ")[0];
+        opts.log?.(`  a previous render of this scene was billed but never delivered (${priorId}) — trying to reclaim it before paying again`);
+        const got = await recoverVideo(priorId, take.file).catch((e) => {
+          opts.log?.(`  could not reclaim it (${(e as Error).message}) — rendering fresh`);
+          return false;
+        });
+        if (got) {
+          markRenderReclaimed(unclaimed.id);
+          opts.log?.(`  reclaimed the paid render — no new charge for this attempt`);
+          await recordVersion({
+            projectId: opts.projectId, kind: "video", sceneId: opts.scene.id,
+            version: take.version, filePath: take.file, prompt,
+          });
+          await promoteVersion(opts.projectId, "video", opts.scene.id, take.version);
+          takeVersion = take.version;
+          return outPath;
+        }
+      }
+
       // Reserved before the call and released after, so concurrent clips see each
       // other's in-flight cost in the budget guard instead of all passing the same
       // stale check and overshooting together.
       reserveSpend(opts.projectId, costPerAttempt);
-      const take = await allocateVersion(opts.projectId, "video", opts.scene.id);
       let result;
       try {
         // Rendered into its own file, so a re-roll that comes back worse than the take
@@ -355,6 +386,25 @@ export async function runSceneVideo(opts: {
           resolution,
           onLog: opts.log,
         });
+      } catch (err) {
+        // Billed but never delivered. The ledger used to miss this entirely — the
+        // recordCost call below only runs on the success path — so a day that burned
+        // 3,226 seconds of Replicate compute and saved zero clips reported $0 of
+        // video spend. Write the line with the prediction id so the money is visible
+        // and the clip is still recoverable by id.
+        if (err instanceof PredictionTimeoutError) {
+          recordCost({
+            projectId: opts.projectId,
+            provider: "replicate",
+            operation: `seedance-video-${resolution}${UNCLAIMED_SUFFIX}`,
+            sceneId: opts.scene.id,
+            usd: costPerAttempt,
+            // The hash is what lets a later re-roll of the SAME prompt reclaim this
+            // render for free instead of paying twice — see the reclaim block above.
+            detail: `${err.predictionId} ${promptHash}`,
+          });
+        }
+        throw err;
       } finally {
         releaseSpend(opts.projectId, costPerAttempt);
       }

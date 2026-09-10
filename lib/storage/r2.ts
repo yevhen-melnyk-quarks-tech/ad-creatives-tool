@@ -105,6 +105,11 @@ async function send(c: R2Config, method: string, key: string, body?: BodyInit, c
     method,
     headers: { ...headers, authorization: authorize(c, method, key, headers, amzDate, dateStamp) },
     body,
+    // Never memoized by Next's patched fetch — see the note in lib/models/http.ts.
+    // Matters for the GET paths (objectSize): two size checks of the same key inside
+    // one second sign identically, and a replayed 404 would report a good upload as
+    // missing.
+    signal: new AbortController().signal,
     // Node needs this to stream a request body rather than buffering it.
     ...(body instanceof Readable || body instanceof ReadableStream ? { duplex: "half" } : {}),
   } as RequestInit);

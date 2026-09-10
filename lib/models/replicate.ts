@@ -99,6 +99,53 @@ type Prediction = {
   metrics?: Record<string, unknown>;
 };
 
+const TERMINAL = ["succeeded", "failed", "canceled"];
+
+/**
+ * A prediction that was created and billed but never observed reaching a terminal
+ * state before we stopped waiting.
+ *
+ * Distinct from a prediction that genuinely failed, and the distinction is worth a
+ * whole error class: the compute is paid for either way, and if it later succeeds the
+ * output is still sitting on Replicate waiting to be downloaded for free. Losing the
+ * id — which is what happened before this existed, since the id lived only inside
+ * `runPrediction`'s closure — makes that unrecoverable and invisible in the ledger.
+ */
+export class PredictionTimeoutError extends Error {
+  /**
+   * Read by `repairLoop`, which otherwise retries a thrown generate(). Retrying this
+   * one means creating a second paid prediction while the first may still be about to
+   * succeed — the exact double-charge this class exists to prevent. Kept as a plain
+   * property rather than an `instanceof` check there so the retry policy does not
+   * have to import a provider module.
+   */
+  readonly retryable = false;
+
+  constructor(
+    readonly predictionId: string,
+    readonly lastStatus: string,
+    readonly waitedSeconds: number
+  ) {
+    super(
+      `Prediction ${predictionId} still ${lastStatus} after ${Math.round(waitedSeconds)}s — ` +
+        `it is billed regardless and may still finish; recoverable by id.`
+    );
+    this.name = "PredictionTimeoutError";
+  }
+}
+
+/** One authoritative read of a prediction's current state. */
+export async function fetchPrediction(id: string, onLog?: (m: string) => void): Promise<Prediction> {
+  const res = await fetchRetry(
+    `${BASE}/predictions/${id}`,
+    { headers: { Authorization: `Bearer ${apiKey()}` } },
+    4,
+    "read prediction",
+    onLog
+  );
+  return readJson<Prediction>(res, "Prediction read");
+}
+
 async function runPrediction(opts: {
   /** Owner/name, for models that expose a default version. */
   model?: string;
@@ -129,7 +176,9 @@ async function runPrediction(opts: {
   const maxPolls = opts.maxPolls ?? 120;
   const pollMs = (opts.pollSeconds ?? 10) * 1000;
 
-  for (let i = 1; i <= maxPolls && !["succeeded", "failed", "canceled"].includes(final.status); i++) {
+  let polls = 0;
+  for (let i = 1; i <= maxPolls && !TERMINAL.includes(final.status); i++) {
+    polls = i;
     await new Promise((r) => setTimeout(r, pollMs));
     const pollRes = await fetchRetry(
       getUrl,
@@ -140,6 +189,23 @@ async function runPrediction(opts: {
     );
     final = await readJson<Prediction>(pollRes, "Prediction poll");
     if (i % 3 === 0) opts.onLog?.(`  [${i}] status=${final.status}`);
+  }
+
+  // Ran out of polls without ever seeing a terminal state. Before giving up, spend a
+  // grace period asking again — the compute is billed either way, so waiting is
+  // strictly cheaper than abandoning it. Only when that also runs out is this a
+  // timeout, reported as one and carrying the id, rather than as
+  // `Prediction processing: {...}` — a message that reads like the provider failed
+  // when in fact we stopped listening to a job we had already paid for.
+  if (!TERMINAL.includes(final.status)) {
+    const waited = (polls * pollMs) / 1000;
+    opts.onLog?.(
+      `  prediction ${created.id} still ${final.status} after ${Math.round(waited)}s — it is already billed, waiting rather than abandoning it`
+    );
+    const reclaimed = await awaitPrediction(created.id, opts.onLog);
+    if (!reclaimed) throw new PredictionTimeoutError(created.id, final.status, waited);
+    opts.onLog?.(`  reclaimed prediction ${created.id}`);
+    final = reclaimed;
   }
 
   if (final.status !== "succeeded") {
@@ -219,6 +285,10 @@ export async function generateVideo(opts: {
       });
       break;
     } catch (err) {
+      // A timeout is never retried here. runPrediction already spent its grace period
+      // trying to reclaim it, and the prediction is billed: generating again would pay
+      // a second time for a clip that may yet appear. Surface the id instead.
+      if (err instanceof PredictionTimeoutError) throw err;
       const message = (err as Error).message;
       if (attempt === MAX_GENERATION_ATTEMPTS || !TRANSIENT_FAILURE.test(message)) throw err;
       opts.onLog?.(
@@ -229,10 +299,7 @@ export async function generateVideo(opts: {
   }
   if (!final) throw new Error("generateVideo: exhausted retries without a result"); // unreachable — every exit above either returns, breaks with `final` set, or throws
 
-  const outputUrl = Array.isArray(final.output) ? (final.output[0] as string) : (final.output as string);
-  const videoRes = await fetchRetry(outputUrl, {}, 4, "download video", opts.onLog);
-  await mkdir(path.dirname(opts.outPath), { recursive: true });
-  await writeFile(opts.outPath, Buffer.from(await videoRes.arrayBuffer()));
+  await downloadOutput(final, opts.outPath, opts.onLog);
 
   return {
     predictionId: final.id,
@@ -241,24 +308,51 @@ export async function generateVideo(opts: {
   };
 }
 
+async function downloadOutput(p: Prediction, outPath: string, onLog?: (m: string) => void) {
+  const url = Array.isArray(p.output) ? (p.output[0] as string) : (p.output as string);
+  if (!url) throw new Error(`Prediction ${p.id} succeeded but carried no output URL`);
+  const res = await fetchRetry(url, {}, 4, "download video", onLog);
+  await mkdir(path.dirname(outPath), { recursive: true });
+  await writeFile(outPath, Buffer.from(await res.arrayBuffer()));
+}
+
+/**
+ * Grace period for a prediction we stopped polling: keep asking until it reaches a
+ * terminal state. Returns the succeeded prediction, or null if it failed or is still
+ * running when the grace runs out.
+ *
+ * Deliberately generous — waiting is free and the alternative is either paying twice
+ * or throwing away a finished clip.
+ */
+async function awaitPrediction(
+  id: string,
+  onLog?: (m: string) => void,
+  graceSeconds = Number(process.env.PREDICTION_GRACE_SECONDS ?? 600)
+): Promise<Prediction | null> {
+  const deadline = Date.now() + graceSeconds * 1000;
+  onLog?.(`  waiting up to ${graceSeconds}s to reclaim it rather than paying for another render`);
+  for (let i = 1; Date.now() < deadline; i++) {
+    const p = await fetchPrediction(id, onLog).catch(() => null);
+    if (p && TERMINAL.includes(p.status)) {
+      if (p.status === "succeeded") return p;
+      onLog?.(`  prediction ${id} ended as ${p.status}`);
+      return null;
+    }
+    if (i % 3 === 0) onLog?.(`  reclaim [${i}] status=${p?.status ?? "unreadable"}`);
+    await new Promise((r) => setTimeout(r, 15000));
+  }
+  onLog?.(`  gave up reclaiming ${id}; it can still be recovered later by id`);
+  return null;
+}
+
 /**
  * Recovers an already-billed prediction instead of paying again. A transient network
  * drop during polling used to lose a completed generation; this reads it back.
  */
 export async function recoverVideo(predictionId: string, outPath: string): Promise<boolean> {
-  const res = await fetchRetry(
-    `${BASE}/predictions/${predictionId}`,
-    { headers: { Authorization: `Bearer ${apiKey()}` } },
-    4,
-    "recover prediction"
-  );
-  const p = await readJson<Prediction>(res, "Prediction recover");
+  const p = await fetchPrediction(predictionId);
   if (p.status !== "succeeded") return false;
-  const url = Array.isArray(p.output) ? (p.output[0] as string) : (p.output as string);
-  if (!url) return false;
-  const videoRes = await fetchRetry(url, {}, 4, "download recovered video");
-  await mkdir(path.dirname(outPath), { recursive: true });
-  await writeFile(outPath, Buffer.from(await videoRes.arrayBuffer()));
+  await downloadOutput(p, outPath);
   return true;
 }
 

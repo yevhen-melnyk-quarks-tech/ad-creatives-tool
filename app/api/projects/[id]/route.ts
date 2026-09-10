@@ -16,12 +16,12 @@ export const dynamic = "force-dynamic";
 type Ctx = { params: Promise<{ id: string }> };
 
 export async function GET(_req: Request, { params }: Ctx) {
-  // The project workspace polls this route every 4s for as long as it is open, which
-  // makes it the most reliable place to guarantee the worker survives a redeploy.
-  // ensureWorker() previously lived only on the home page and the project-list route
-  // — neither of which a user sitting on an already-open project page ever hits, so a
-  // job left queued right before a deploy could sit forever until someone happened to
-  // navigate to the project list or submit a brand-new job (enqueue() calls it too).
+  // Safety net. instrumentation.ts is the primary start point now, but this route is
+  // polled every 4s for as long as a project page is open, so it is the surest place
+  // to notice a worker that is somehow not running. Safe to call from here for the
+  // same reason it is unsafe from a Server Component: Route Handlers are not part of
+  // the React component tree and their fetches are not memoized, so a timer created
+  // in this context polls normally.
   ensureWorker();
 
   const { id } = await params;

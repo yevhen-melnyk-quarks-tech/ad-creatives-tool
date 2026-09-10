@@ -209,13 +209,56 @@ export function recordCost(row: {
   sceneId?: string | null;
   usd: number;
   detail?: string;
-}) {
+}): string {
+  const id = uid();
   db()
     .prepare(
       `INSERT INTO costs (id, project_id, provider, operation, scene_id, usd, detail)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(uid(), row.projectId, row.provider, row.operation, row.sceneId ?? null, row.usd, row.detail ?? null);
+    .run(id, row.projectId, row.provider, row.operation, row.sceneId ?? null, row.usd, row.detail ?? null);
+  return id;
+}
+
+/** Marker written into a cost row's `operation` when a render was billed but never delivered. */
+export const UNCLAIMED_SUFFIX = "-unclaimed";
+
+/**
+ * The most recent paid-but-undelivered render for a scene, if there is one.
+ *
+ * `detail` holds `<predictionId> <promptHash>`. The hash is what makes reusing it
+ * safe: a re-roll whose prompt differs at all (the operator edited their note, a
+ * repair addition changed) must pay for a new render rather than silently handing
+ * back a clip generated from different instructions.
+ */
+export function findUnclaimedRender(projectId: string, sceneId: string, promptHash: string) {
+  return db()
+    .prepare(
+      `SELECT id, detail FROM costs
+        WHERE project_id = ? AND scene_id = ? AND operation LIKE '%' || ?
+          AND detail LIKE '% ' || ?
+        -- rowid breaks the tie: created_at has one-second resolution, so two lost
+        -- renders of the same scene in the same second would otherwise come back in
+        -- insertion order, handing back the older one.
+        ORDER BY created_at DESC, rowid DESC LIMIT 1`
+    )
+    .get(projectId, sceneId, UNCLAIMED_SUFFIX, promptHash) as
+    | { id: string; detail: string }
+    | undefined;
+}
+
+/**
+ * Flips an unclaimed row to reclaimed once its output has actually been downloaded.
+ *
+ * The spend stays on the ledger — it was genuinely charged — but the row stops
+ * matching `findUnclaimedRender`, so one lost render can never be reclaimed twice.
+ */
+export function markRenderReclaimed(costId: string) {
+  db()
+    .prepare(
+      `UPDATE costs SET operation = replace(operation, ?, '-reclaimed') WHERE id = ?`
+    )
+    .run(UNCLAIMED_SUFFIX, costId);
 }
 
 export const projectSpendUsd = (projectId: string): number =>

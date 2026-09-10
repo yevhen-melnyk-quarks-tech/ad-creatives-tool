@@ -1,6 +1,5 @@
 import Link from "next/link";
 import { db } from "@/lib/db";
-import { ensureWorker } from "@/lib/jobs/worker";
 import NewProjectForm from "./NewProjectForm";
 import ThemeToggle from "./ThemeToggle";
 
@@ -9,9 +8,10 @@ export const dynamic = "force-dynamic";
 type Row = { id: string; title: string; status: string; created_at: string };
 
 export default function Home() {
-  // Kick the job loop on first page load, so a restarted container picks up work
-  // without waiting for someone to hit an API route.
-  ensureWorker();
+  // Deliberately does NOT call ensureWorker(). instrumentation.ts starts the worker at
+  // boot instead: a poll timer created inside a Server Component render inherits that
+  // render's fetch memoization and freezes every Replicate status poll. See the note
+  // in instrumentation.ts.
   const projects = db()
     .prepare(`SELECT id, title, status, created_at FROM projects ORDER BY created_at DESC`)
     .all() as Row[];
