@@ -8,7 +8,7 @@ type Ctx = { params: Promise<{ id: string }> };
 
 const KINDS: JobKind[] = [
   "character_card", "storyboards", "storyboard_one",
-  "videos", "video_one", "captions", "assemble", "offload",
+  "videos", "video_one", "captions", "assemble", "offload", "localize",
 ];
 
 export async function GET(req: Request, { params }: Ctx) {
@@ -27,7 +27,7 @@ export async function GET(req: Request, { params }: Ctx) {
 export async function POST(req: Request, { params }: Ctx) {
   const { id } = await params;
   const body = (await req.json().catch(() => null)) as
-    | { kind?: JobKind; sceneId?: string; note?: string; force?: boolean }
+    | { kind?: JobKind; sceneId?: string; note?: string; force?: boolean; languages?: string[] }
     | null;
   if (!body?.kind || !KINDS.includes(body.kind)) {
     return NextResponse.json({ error: `kind must be one of ${KINDS.join(", ")}` }, { status: 400 });
@@ -68,13 +68,23 @@ export async function POST(req: Request, { params }: Ctx) {
     )
     .all(id, body.kind) as { id: string; kind: string; status: string; payload: string }[];
 
-  const duplicate = existing.find((j) => {
+  // Compared on scene AND languages. Keying on scene alone was correct while every
+  // job kind was either whole-project or per-scene, but a localization job carries
+  // neither a scene nor a single identity: two runs for different languages both have
+  // sceneId null, so the second would have been silently swallowed as a duplicate of
+  // the first and those languages would never have been produced.
+  const sameTarget = (payload: string) => {
     try {
-      return (JSON.parse(j.payload).sceneId ?? null) === (body.sceneId ?? null);
+      const p = JSON.parse(payload) as { sceneId?: string | null; languages?: string[] };
+      if ((p.sceneId ?? null) !== (body.sceneId ?? null)) return false;
+      const a = [...(p.languages ?? [])].sort().join("|");
+      const b = [...(body.languages ?? [])].sort().join("|");
+      return a === b;
     } catch {
       return false;
     }
-  });
+  };
+  const duplicate = existing.find((j) => sameTarget(j.payload));
 
   if (duplicate) {
     // 200 with the in-flight id, not an error: the user's intent is already being
@@ -85,8 +95,14 @@ export async function POST(req: Request, { params }: Ctx) {
     );
   }
 
-  // One running job at a time keeps ffmpeg and the model APIs from contending, and
-  // makes the progress log readable. Queueing is fine; parallelism is not the goal.
-  const jobId = enqueue(id, body.kind, { sceneId: body.sceneId, force: body.force === true });
+  // `languages` is carried through explicitly. Everything not named here is dropped,
+  // which is the safe default for a client-supplied payload — but it also means any
+  // new field a job kind needs has to be added in this one place, and a silently
+  // missing one looks like the feature simply not working.
+  const jobId = enqueue(id, body.kind, {
+    sceneId: body.sceneId,
+    force: body.force === true,
+    ...(Array.isArray(body.languages) ? { languages: body.languages } : {}),
+  });
   return NextResponse.json({ jobId }, { status: 202 });
 }

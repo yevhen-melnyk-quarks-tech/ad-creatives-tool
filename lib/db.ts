@@ -138,6 +138,16 @@ function migrate(d: Database.Database) {
       UNIQUE(project_id, kind, scene_id, version)
     );
 
+    -- Application-wide settings, as opposed to the per-project settings that live as
+    -- columns on the projects table. The first of these is the localization languages,
+    -- which is chosen once and reused by every project — a project column would mean
+    -- re-picking it for every ad, and an env var would mean a redeploy to change it.
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key        TEXT PRIMARY KEY,
+      value      TEXT NOT NULL,          -- JSON, so a setting can be a list or an object
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_versions ON artifact_versions(project_id, kind, scene_id, version);
     CREATE INDEX IF NOT EXISTS idx_jobs_status    ON jobs(status, created_at);
     CREATE INDEX IF NOT EXISTS idx_qa_project     ON qa_runs(project_id, stage);
@@ -302,6 +312,37 @@ export const listNotes = (projectId: string) =>
   db()
     .prepare(`SELECT kind, scene_id, note FROM artifact_notes WHERE project_id=?`)
     .all(projectId) as { kind: string; scene_id: string | null; note: string }[];
+
+/** Key of the app-wide localization language list, stored as a JSON array of names. */
+export const LOCALIZE_LANGUAGES_KEY = "localize.languages";
+
+/**
+ * An app-wide setting, or `fallback` when unset or unparseable.
+ *
+ * Corrupt JSON returns the fallback rather than throwing: these are read on the
+ * render path of the project page, and a bad row should not be able to take the whole
+ * interface down.
+ */
+export function getSetting<T>(key: string, fallback: T): T {
+  const row = db().prepare(`SELECT value FROM app_settings WHERE key=?`).get(key) as
+    | { value: string }
+    | undefined;
+  if (!row) return fallback;
+  try {
+    return JSON.parse(row.value) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+export function setSetting(key: string, value: unknown) {
+  db()
+    .prepare(
+      `INSERT INTO app_settings (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')`
+    )
+    .run(key, JSON.stringify(value));
+}
 
 /**
  * Requeues jobs left in `running` by a process that died mid-flight — a redeploy,

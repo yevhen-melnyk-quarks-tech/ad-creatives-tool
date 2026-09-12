@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { DELIVERABLES, remoteUrl, remoteRow } from "@/lib/storage/deliverables";
+import { deliverablesFor, remoteUrl, remoteRow } from "@/lib/storage/deliverables";
 
 export const dynamic = "force-dynamic";
 
@@ -23,7 +23,11 @@ export async function GET(req: Request, { params }: Ctx) {
   const { id } = await params;
   const name = new URL(req.url).searchParams.get("name") ?? "";
 
-  if (!DELIVERABLES.some((d) => d.name === name)) {
+  // Scoped to THIS project's deliverables, which now include its localized cuts.
+  // Still an allowlist, and still for the same reason: `name` comes from the client,
+  // and an unconstrained value would sign a URL for any key in a bucket that spans
+  // every project.
+  if (!deliverablesFor(id).some((d) => d.name === name)) {
     return NextResponse.json({ error: "unknown deliverable" }, { status: 400 });
   }
   if (!remoteRow(id, name)) {

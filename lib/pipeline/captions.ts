@@ -14,8 +14,8 @@ import type { WhisperWord } from "../models/replicate";
 
 // The reference ad keeps every caption to a single line of 2-3 words. Four words at
 // this font size wrapped to two lines, which the reference never does.
-const MAX_CHUNK_WORDS = 3;
-const MAX_CHUNK_SECONDS = 1.8;
+export const MAX_CHUNK_WORDS = 3;
+export const MAX_CHUNK_SECONDS = 1.8;
 
 const norm = (w: string) => w.toLowerCase().replace(/[^a-z0-9]/g, "");
 
@@ -115,7 +115,7 @@ function chunk(scriptWords: string[], times: { start: number; end: number }[]) {
     }));
 }
 
-const srtTime = (sec: number) => {
+export const srtTime = (sec: number) => {
   const ms = Math.max(0, Math.round(sec * 1000));
   const h = String(Math.floor(ms / 3600000)).padStart(2, "0");
   const m = String(Math.floor((ms % 3600000) / 60000)).padStart(2, "0");

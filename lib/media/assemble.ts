@@ -174,6 +174,115 @@ export async function assembleFinal(opts: AssembleOptions): Promise<AssembleResu
     const storyDuration = infos.reduce((a, i) => a + i.seconds, 0);
     onLog?.(`  story: ${storyDuration.toFixed(2)}s`);
 
+    const { totalDurationSeconds: total } = await burnAndFinish({
+      // Read straight from the concat list: an intermediate concatenated file would be
+      // a full-length copy on disk for no gain, since every frame gets re-encoded here.
+      inputArgs: ["-f", "concat", "-safe", "0", "-i", listPath],
+      lastFrameSource: sourcePaths[sourcePaths.length - 1],
+      storyDurationSeconds: storyDuration,
+      srtPath,
+      outPath,
+      workDir,
+      disclaimerBold,
+      disclaimerRegular,
+      ctaText,
+      onLog,
+      onProgress,
+    });
+
+    // ── 5. Localization master ───────────────────────────────────────────────────
+    // The story with NO burned text of any kind, at the clips' native resolution: a
+    // stream copy of the same conformed footage the final cut was built from. It carries
+    // no English, so a translated or re-voiced cut starts here.
+    //
+    // Built last, and only after the intermediates are gone, so peak disk stays at one
+    // deliverable plus one working copy rather than all of them at once. The CTA is
+    // excluded rather than included-without-text: without its text it is just a blurred
+    // still, cheaper to re-render per locale than to patch over the English one.
+    const cleanPath = path.join(path.dirname(outPath), "MASTER_clean.mp4");
+
+    // Skipped rather than attempted when it will not fit. Half a master left on disk is
+    // worse than none: it looks like a deliverable and plays as a broken one.
+    const needForMaster = Math.round(clipBytes * 1.15);
+    const freeNow = await freeBytes(workDir);
+    let cleanWritten = false;
+    if (freeNow < needForMaster) {
+      onLog?.(
+        `  SKIPPED the localization master: ${humanBytes(freeNow)} free, ${humanBytes(needForMaster)} needed. ` +
+          `The final cut is finished and downloadable. Free space or grow the volume, then assemble again.`
+      );
+      await rm(cleanPath, { force: true });
+    } else {
+      onLog?.("Writing localization master (no burned text)...");
+      await run(
+        ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", cleanPath],
+        "clean master"
+      );
+      cleanWritten = true;
+    }
+
+    onLog?.(`DONE -> ${outPath} (${total.toFixed(2)}s)`);
+    return {
+      finalPath: outPath,
+      cleanPath: cleanWritten ? cleanPath : null,
+      storyDurationSeconds: storyDuration,
+      totalDurationSeconds: total,
+    };
+  } finally {
+    // Runs on every exit, success or throw: a run's scratch is its own unique
+    // subdirectory now (see workAttempt in lib/paths.ts), so cleaning it up here
+    // can never touch a DIFFERENT attempt's files - which sharing one `_work`
+    // across every attempt could not guarantee.
+    await rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+export type BurnOptions = {
+  /** ffmpeg input arguments for the footage: a concat list, or a single `-i file`. */
+  inputArgs: string[];
+  /** The clip the frozen closing frame is grabbed from. */
+  lastFrameSource: string;
+  storyDurationSeconds: number;
+  srtPath: string;
+  outPath: string;
+  workDir: string;
+  disclaimerBold?: string;
+  disclaimerRegular?: string;
+  ctaText?: string;
+  onLog?: (m: string) => void;
+  onProgress?: (fraction: number, label: string) => void;
+};
+
+/**
+ * Everything that turns bare footage into a deliverable: upscale, burn captions and
+ * the legal descriptor, build the CTA outro, join.
+ *
+ * Split out of `assembleFinal` so the localized cuts go through exactly the same code.
+ * They start from a different place — one already-translated file rather than a list
+ * of clips — but must come out looking identical to the English one, and a second
+ * implementation of this would drift from the first the moment either was tuned.
+ * Every measured constant above (the caption style sizes, the descriptor leading, the
+ * CTA geometry, the three-command split that keeps the filter graph under 1 GB) then
+ * applies to both by construction.
+ */
+export async function burnAndFinish(opts: BurnOptions): Promise<{ totalDurationSeconds: number }> {
+  const {
+    inputArgs,
+    lastFrameSource,
+    storyDurationSeconds: storyDuration,
+    srtPath,
+    outPath,
+    workDir,
+    disclaimerBold = "AI-generated.",
+    disclaimerRegular = "Fictional story. Results not typical and may vary.",
+    ctaText = "TRY NOW",
+    onLog,
+    onProgress,
+  } = opts;
+
+  await mkdir(workDir, { recursive: true });
+
+  {
     // ── 2. Captions + disclaimer ─────────────────────────────────────────────────
     // Values are ASS script units: SRT-sourced subtitles lay out against PlayResY=288,
     // NOT pixels, so everything scales by H/288 on render. A pixel-scale MarginV once
@@ -233,7 +342,7 @@ export async function assembleFinal(opts: AssembleOptions): Promise<AssembleResu
     // footage until the blur ramped in.
     onLog?.("Grabbing the closing frame...");
     const lastFrame = path.join(workDir, "lastframe.png");
-    const lastClip = sourcePaths[sourcePaths.length - 1];
+    const lastClip = lastFrameSource;
     const lastClipDuration = await durationOf(lastClip);
     // Seek from an absolute offset. `-sseof -0.1` decoded zero frames ("Output file is
     // empty") — the end-relative seek landed past the final frame, and ffmpeg still
@@ -287,12 +396,18 @@ export async function assembleFinal(opts: AssembleOptions): Promise<AssembleResu
       ...discFilters,
     ].join(",");
 
-    // Read straight from the concat list: an intermediate concatenated file would be a
-    // full-length copy on disk for no gain, since every frame gets re-encoded here anyway.
     const storyPath = path.join(workDir, "02_story.mp4");
     onLog?.("Burning captions + descriptor (the long step)...");
     await run(
-      ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-vf", vf, ...X264, ...AAC, storyPath],
+      [
+        "-y", ...inputArgs, "-vf", vf,
+        // Only the first video and audio stream. A translated source arrives carrying
+        // an embedded mov_text subtitle track (HeyGen adds one when captions are
+        // enabled), which would otherwise ride along into the deliverable as a soft
+        // track sitting underneath the captions we are burning in right here.
+        "-map", "0:v:0", "-map", "0:a:0", "-sn",
+        ...X264, ...AAC, storyPath,
+      ],
       "captions",
       {
         // A three-and-a-half minute 1080x1920 encode on two threads is comfortably
@@ -364,52 +479,12 @@ export async function assembleFinal(opts: AssembleOptions): Promise<AssembleResu
     // and nothing downstream reads it.
     await Promise.all([rm(storyPath, { force: true }), rm(ctaPath, { force: true })]);
 
-    const total = parseFloat(await probe(outPath, "format=duration"));
-
-    // ── 5. Localization master ───────────────────────────────────────────────────
-    // The story with NO burned text of any kind, at the clips' native resolution: a
-    // stream copy of the same conformed footage the final cut was built from. It carries
-    // no English, so a translated or re-voiced cut starts here.
-    //
-    // Built last, and only after the intermediates are gone, so peak disk stays at one
-    // deliverable plus one working copy rather than all of them at once. The CTA is
-    // excluded rather than included-without-text: without its text it is just a blurred
-    // still, cheaper to re-render per locale than to patch over the English one.
-    const cleanPath = path.join(path.dirname(outPath), "MASTER_clean.mp4");
+    // Reclaimed before probing so the frozen still does not sit alongside the
+    // deliverable any longer than it has to.
     await rm(lastFrame, { force: true });
 
-    // Skipped rather than attempted when it will not fit. Half a master left on disk is
-    // worse than none: it looks like a deliverable and plays as a broken one.
-    const needForMaster = Math.round(clipBytes * 1.15);
-    const freeNow = await freeBytes(workDir);
-    let cleanWritten = false;
-    if (freeNow < needForMaster) {
-      onLog?.(
-        `  SKIPPED the localization master: ${humanBytes(freeNow)} free, ${humanBytes(needForMaster)} needed. ` +
-          `The final cut is finished and downloadable. Free space or grow the volume, then assemble again.`
-      );
-      await rm(cleanPath, { force: true });
-    } else {
-      onLog?.("Writing localization master (no burned text)...");
-      await run(
-        ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", cleanPath],
-        "clean master"
-      );
-      cleanWritten = true;
-    }
-
+    const total = parseFloat(await probe(outPath, "format=duration"));
     onLog?.(`DONE -> ${outPath} (${total.toFixed(2)}s)`);
-    return {
-      finalPath: outPath,
-      cleanPath: cleanWritten ? cleanPath : null,
-      storyDurationSeconds: storyDuration,
-      totalDurationSeconds: total,
-    };
-  } finally {
-    // Runs on every exit, success or throw: a run's scratch is its own unique
-    // subdirectory now (see workAttempt in lib/paths.ts), so cleaning it up here
-    // can never touch a DIFFERENT attempt's files - which sharing one `_work`
-    // across every attempt could not guarantee.
-    await rm(workDir, { recursive: true, force: true }).catch(() => {});
+    return { totalDurationSeconds: total };
   }
 }

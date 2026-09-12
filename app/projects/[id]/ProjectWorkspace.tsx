@@ -38,6 +38,7 @@ const KIND_LABEL: Record<string, string> = {
   captions: "Captions",
   assemble: "Final assembly",
   offload: "Moving to storage",
+  localize: "Localization",
 };
 
 const VERDICT_STYLE: Record<string, string> = {
@@ -119,12 +120,12 @@ export default function ProjectWorkspace(props: {
     return () => clearInterval(t);
   }, [refresh]);
 
-  async function startJob(kind: string, sceneId?: string, note?: string) {
+  async function startJob(kind: string, sceneId?: string, note?: string, languages?: string[]) {
     setBusy(sceneId ? `${kind}:${sceneId}` : kind);
     const res = await fetch(`/api/projects/${projectId}/jobs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind, sceneId, note }),
+      body: JSON.stringify({ kind, sceneId, note, languages }),
     });
     const data = await res.json().catch(() => ({}));
     // Say so out loud when a click landed on work already in flight. Silence here is
@@ -869,6 +870,18 @@ export default function ProjectWorkspace(props: {
 
             {(find("final") || props.status === "complete") && <StorageRow deliverables={deliverables} storageConfigured={storageConfigured} onOffload={() => startJob("offload")} busy={busy === "offload"} />}
           </Step>
+
+          <Step n={5} title="Localization (optional)">
+            <LocalizationPanel
+              projectId={projectId}
+              deliverables={deliverables}
+              hasFinal={Boolean(find("final") || props.status === "complete")}
+              running={jobs.find((j) => j.kind === "localize" && (j.status === "running" || j.status === "queued")) ?? null}
+              busy={busy === "localize"}
+              onStart={(languages) => startJob("localize", undefined, undefined, languages)}
+              isRemote={isRemote}
+            />
+          </Step>
         </div>
       )}
     </main>
@@ -1283,6 +1296,205 @@ function JobBadge({ state }: { state: "generating" | "queued" | null }) {
     </span>
   );
 }
+
+/**
+ * The optional last step: translated voiceover, lip-sync and a finished cut per market.
+ *
+ * The language list is app-wide rather than per-project (it is a property of the
+ * business, not of one ad), so it is loaded from and saved to /api/settings rather
+ * than living in this project's state.
+ */
+function LocalizationPanel({
+  projectId, deliverables, hasFinal, running, busy, onStart, isRemote,
+}: {
+  projectId: string;
+  deliverables: Deliverable[];
+  hasFinal: boolean;
+  running: Job | null;
+  busy: boolean;
+  onStart: (languages: string[]) => void;
+  isRemote: (name: string) => boolean;
+}) {
+  const [languages, setLanguages] = useState<string[]>([]);
+  const [available, setAvailable] = useState<string[]>([]);
+  const [credits, setCredits] = useState<number | null>(null);
+  const [configured, setConfigured] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [filter, setFilter] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/settings")
+      .then((r) => r.json())
+      .then((d) => {
+        if (cancelled) return;
+        setLanguages(d.languages ?? []);
+        setAvailable(d.available ?? []);
+        setCredits(d.credits ?? null);
+        setConfigured(Boolean(d.configured));
+        setLoadError(d.error ?? null);
+        setLoaded(true);
+      })
+      .catch((e) => {
+        if (!cancelled) { setLoadError(String(e)); setLoaded(true); }
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  async function save(next: string[]) {
+    setSaving(true);
+    setLanguages(next);
+    await fetch("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ languages: next }),
+    }).catch(() => {});
+    setSaving(false);
+  }
+
+  // Derived from what the project actually has, so a language removed from the
+  // app-wide list never hides a cut that was already produced and paid for.
+  const localized = deliverables.filter((d) => d.name.startsWith("FINAL_"));
+  const doneFor = new Set(localized.map((d) => d.name));
+
+  if (!hasFinal) {
+    return (
+      <p className="text-sm text-ink-subtle">
+        Localization runs on a finished ad. Assemble the final cut first, then come back — this step is optional and
+        meant for a creative that has already tested well.
+      </p>
+    );
+  }
+
+  return (
+    <div>
+      <p className="mb-3 max-w-2xl text-sm text-ink-subtle">
+        Translates the clean master into each language with a matching voice and lip-sync, then re-burns captions, the
+        descriptor and the CTA — so each market gets a finished cut, not a raw translation. Chosen once here and reused
+        by every project.
+      </p>
+
+      {!configured && (
+        <p className="mb-3 rounded-md bg-warn-bg-strong px-3 py-2 text-xs text-warn-ink">
+          HEYGEN_API_KEY is not set, so localization cannot run.
+        </p>
+      )}
+      {configured && loadError && (
+        <p className="mb-3 rounded-md bg-warn-bg-strong px-3 py-2 text-xs text-warn-ink">
+          Could not reach HeyGen ({loadError}). Your saved languages are still shown; starting a run may fail.
+        </p>
+      )}
+
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        {!loaded ? (
+          <span className="shimmer h-6 w-56 rounded-full" />
+        ) : languages.length === 0 ? (
+          <span className="text-sm text-ink-subtle">No languages chosen yet.</span>
+        ) : (
+          languages.map((l) => (
+            <span
+              key={l}
+              className="inline-flex items-center gap-1.5 rounded-full border border-line px-2.5 py-1 text-xs"
+            >
+              {l}
+              {doneFor.has(`FINAL_${slugForDisplay(l)}.mp4`) && <span className="text-ok-ink">✓</span>}
+            </span>
+          ))
+        )}
+        <button
+          onClick={() => setEditing((v) => !v)}
+          className="rounded-md px-2 py-1 text-xs text-ink-muted underline transition-opacity active:opacity-60 hover:text-ink"
+        >
+          {editing ? "Done" : "Edit languages"}
+        </button>
+      </div>
+
+      {editing && (
+        <div className="mb-4 rounded-md border border-line p-3">
+          <input
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder={`Filter ${available.length || ""} languages…`}
+            className="mb-2 w-full rounded border border-line bg-transparent px-2 py-1.5 text-sm"
+          />
+          <div className="max-h-56 overflow-y-auto">
+            {available.length === 0 ? (
+              <p className="text-xs text-ink-subtle">
+                The language list comes from HeyGen and could not be loaded.
+              </p>
+            ) : (
+              available
+                .filter((l) => l.toLowerCase().includes(filter.toLowerCase()))
+                .slice(0, 200)
+                .map((l) => (
+                  <label key={l} className="flex cursor-pointer items-center gap-2 py-0.5 text-xs">
+                    <input
+                      type="checkbox"
+                      checked={languages.includes(l)}
+                      onChange={(e) =>
+                        void save(e.target.checked ? [...languages, l] : languages.filter((x) => x !== l))
+                      }
+                    />
+                    {l}
+                  </label>
+                ))
+            )}
+          </div>
+          {saving && <p className="mt-1 text-xs text-ink-subtle">Saving…</p>}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-3">
+        <Btn
+          onClick={() => onStart(languages)}
+          busy={busy}
+          disabled={languages.length === 0 || !configured || Boolean(running)}
+        >
+          {running ? "Localizing…" : `Localize into ${languages.length || "…"} language${languages.length === 1 ? "" : "s"}`}
+        </Btn>
+        {credits !== null && (
+          <span className="text-xs text-ink-subtle">
+            {credits.toLocaleString()} HeyGen credits left
+            {languages.length > 0 && ` · this run bills per minute, per language`}
+          </span>
+        )}
+      </div>
+
+      {running && (
+        <p className="mt-3 text-xs text-ink-subtle">
+          {running.progress_label ?? "starting…"}
+          {running.progress_total ? ` (${(running.progress_step ?? 0) + 1}/${running.progress_total})` : ""}
+        </p>
+      )}
+
+      {localized.length > 0 && (
+        <div className="mt-4">
+          <p className="mb-2 text-xs font-medium text-ink-muted">Localized cuts</p>
+          <div className="flex flex-col items-start gap-1.5 text-xs">
+            {localized.map((d) => (
+              <span key={d.name} className="flex flex-wrap items-baseline gap-2">
+                <a
+                  href={`/api/projects/${projectId}/file?name=${encodeURIComponent(d.name)}&download=1`}
+                  className="underline transition-opacity active:opacity-60 hover:text-ink"
+                >
+                  {d.label}
+                </a>
+                <ShareLink projectId={projectId} name={d.name} enabled={isRemote(d.name)} />
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Mirrors localeSlug in lib/storage/deliverables.ts, for matching finished cuts. */
+const slugForDisplay = (language: string) =>
+  language.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 
 function Step({ n, title, children }: { n: number; title: string; children: React.ReactNode }) {
   return (

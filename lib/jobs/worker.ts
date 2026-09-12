@@ -1,9 +1,10 @@
-import { db, uid, recordCost, recoverOrphanedJobs, setProgress } from "../db";
+import { db, uid, recordCost, recoverOrphanedJobs, setProgress, getSetting, LOCALIZE_LANGUAGES_KEY } from "../db";
 import { mapWithConcurrency } from "../util/concurrency";
 import { withUsageSink } from "../models/usageTracker";
 import { estimateGeminiUsd, type Usage } from "../models/pricing";
 import { ScenarioSchema, type Scenario } from "../pipeline/types";
-import { runCharacterCard, runStoryboard, runSceneVideo, runCaptions, runAssembly, captionsAreStale } from "../pipeline/stages";
+import { runCharacterCard, runStoryboard, runSceneVideo, runCaptions, runAssembly, captionsAreStale, resolveDisclaimer } from "../pipeline/stages";
+import { runLocalize } from "../pipeline/localize";
 import { offloadDeliverables } from "../storage/deliverables";
 import { humanBytes } from "../paths";
 
@@ -47,6 +48,17 @@ const CONCURRENCY_VIDEO = Number(process.env.CONCURRENCY_VIDEO ?? 3);
 export const MAX_CONCURRENT_PROJECTS = Number(process.env.MAX_CONCURRENT_PROJECTS ?? 3);
 export const MAX_CONCURRENT_ASSEMBLE = Number(process.env.MAX_CONCURRENT_ASSEMBLE ?? 1);
 
+/**
+ * Job kinds that run a full-length ffmpeg encode and therefore share the tighter cap.
+ *
+ * `localize` belongs here even though most of its wall-clock is spent waiting on
+ * HeyGen: it finishes by running the very same 1080x1920 burn that `assemble` does,
+ * once per language. Letting it run alongside an assembly would put two of those
+ * encodes in a 1 GB container, which is the documented way to get SIGKILLed here.
+ */
+const ENCODE_HEAVY: JobKind[] = ["assemble", "localize"];
+const isEncodeHeavy = (kind: JobKind) => ENCODE_HEAVY.includes(kind);
+
 export type JobKind =
   | "character_card"
   | "storyboards"      // every scene
@@ -55,7 +67,8 @@ export type JobKind =
   | "video_one"
   | "captions"
   | "assemble"
-  | "offload";     // move finished deliverables to object storage
+  | "offload"      // move finished deliverables to object storage
+  | "localize";    // translated voiceover + lip-sync + a finished cut per language
 
 /**
  * Shared on `globalThis` rather than a plain module-level variable.
@@ -138,7 +151,7 @@ async function tick() {
   const job = candidates.find(
     (j) =>
       !state.runningProjects.has(j.project_id) &&
-      (j.kind !== "assemble" || state.runningAssembleCount < MAX_CONCURRENT_ASSEMBLE)
+      (!isEncodeHeavy(j.kind) || state.runningAssembleCount < MAX_CONCURRENT_ASSEMBLE)
   );
   if (!job) return;
 
@@ -165,14 +178,14 @@ async function tick() {
   if (claim.changes === 0) return; // someone else claimed it between our SELECT and UPDATE; next tick tries again
 
   state.runningProjects.add(job.project_id);
-  if (job.kind === "assemble") state.runningAssembleCount++;
+  if (isEncodeHeavy(job.kind)) state.runningAssembleCount++;
 
   // Deliberately NOT awaited: awaiting here would serialize every job again, exactly
   // the thing this rewrite exists to remove. tick() returns immediately so the next
   // 1s-later tick can claim into another open project slot while this one runs.
   void runClaimedJob(job).finally(() => {
     state.runningProjects.delete(job.project_id);
-    if (job.kind === "assemble") state.runningAssembleCount--;
+    if (isEncodeHeavy(job.kind)) state.runningAssembleCount--;
   });
 }
 
@@ -450,6 +463,36 @@ async function execute(
       const { moved, bytes } = await offloadDeliverables(projectId, log);
       setProgress(jobId, "uploading", 1, 1);
       log(moved ? `Done — ${moved} file(s) moved, ${humanBytes(bytes)} freed.` : "Nothing to move.");
+      return;
+    }
+
+    // The optional last step: translated voiceover and lip-sync per language, each
+    // finished into a full localized cut. Only worth running once an ad has proved
+    // itself, which is why nothing enqueues this automatically.
+    case "localize": {
+      const languages = Array.isArray(payload.languages)
+        ? (payload.languages as string[])
+        : getSetting<string[]>(LOCALIZE_LANGUAGES_KEY, []);
+      setStatus(projectId, "localizing");
+      // The same descriptor the English cut carries. Localized cuts keep it in
+      // English by decision, not omission: a translated legal disclaimer is a legal
+      // question rather than a rendering one.
+      const disclaimer = resolveDisclaimer(projectId, scenario);
+      const results = await runLocalize({
+        projectId,
+        languages,
+        log,
+        jobId,
+        disclaimerBold: disclaimer.bold,
+        disclaimerRegular: disclaimer.body,
+      });
+      setStatus(projectId, "complete");
+      const failed = results.filter((r) => !r.ok);
+      // Surfaced as a thrown error only if EVERY language failed. A partial run still
+      // produced usable ads, and failing the job would hide them behind a red banner.
+      if (failed.length === results.length && results.length > 0) {
+        throw new Error(`All ${failed.length} language(s) failed — ${failed[0].error}`);
+      }
       return;
     }
 

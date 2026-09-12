@@ -1,4 +1,5 @@
 import { rm, stat } from "node:fs/promises";
+import { readdirSync } from "node:fs";
 import path from "node:path";
 import { db } from "../db";
 import { projectDir, humanBytes } from "../paths";
@@ -19,14 +20,75 @@ import { r2Config, putFile, objectSize, presignGet, objectKey } from "./r2";
  * them through the network on every render would buy nothing.
  */
 
-/** The finished outputs, in the order the interface lists them. */
-export const DELIVERABLES: { name: string; contentType: string; label: string }[] = [
+export type Deliverable = { name: string; contentType: string; label: string };
+
+/** The finished outputs every project has, in the order the interface lists them. */
+export const DELIVERABLES: Deliverable[] = [
   { name: "FINAL.mp4", contentType: "video/mp4", label: "Final cut" },
   { name: "MASTER_clean.mp4", contentType: "video/mp4", label: "Clean master" },
   { name: "transcript.srt", contentType: "text/plain; charset=utf-8", label: "Transcript" },
   { name: "transcript.json", contentType: "application/json", label: "Transcript JSON" },
   { name: "captions.srt", contentType: "text/plain; charset=utf-8", label: "Burned captions" },
 ];
+
+/**
+ * Localized filenames are derived from the language name, not stored, so that every
+ * consumer agrees on them without a lookup: `Spanish (Spain)` -> `FINAL_spanish_spain.mp4`.
+ * Lossy on purpose — the slug only has to be a stable, filesystem-safe key.
+ */
+export const localeSlug = (language: string) =>
+  language
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+
+export const localizedVideoName = (language: string) => `FINAL_${localeSlug(language)}.mp4`;
+export const localizedCaptionName = (language: string) => `captions_${localeSlug(language)}.srt`;
+
+/**
+ * Every deliverable this project actually has, static plus localized.
+ *
+ * The static list alone was the single biggest structural obstacle to localization:
+ * it drives uploads, the interface's file list AND the share-link allowlist, so a
+ * per-language file that was not in it would never reach object storage and could
+ * never be shared — while still appearing to exist, because the download route
+ * serves anything in the project directory by name.
+ *
+ * Derived from what is on disk or already offloaded rather than from the configured
+ * language list, so that changing the app-wide languages later never orphans the
+ * files a project has already produced.
+ */
+export function deliverablesFor(projectId: string): Deliverable[] {
+  const present = new Set<string>(remoteNames(projectId));
+  for (const name of localFileNames(projectId)) present.add(name);
+
+  const localized = [...present]
+    .filter((n) => n.startsWith("FINAL_") || n.startsWith("captions_"))
+    .sort()
+    .map((name) => {
+      const slug = name.replace(/^(FINAL_|captions_)/, "").replace(/\.(mp4|srt)$/, "");
+      const language = slug.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+      const isVideo = name.endsWith(".mp4");
+      return {
+        name,
+        contentType: isVideo ? "video/mp4" : "text/plain; charset=utf-8",
+        label: `${isVideo ? "Final cut" : "Captions"} — ${language}`,
+      };
+    });
+
+  return [...DELIVERABLES, ...localized];
+}
+
+/** Filenames directly inside the project directory; [] when it does not exist yet. */
+function localFileNames(projectId: string): string[] {
+  try {
+    return readdirSync(projectDir(projectId), { withFileTypes: true })
+      .filter((e) => e.isFile())
+      .map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
 
 export type RemoteRow = { project_id: string; name: string; object_key: string; bytes: number; content_type: string };
 
@@ -73,7 +135,7 @@ export async function offloadDeliverables(projectId: string, log: (m: string) =>
 
   let moved = 0;
   let bytes = 0;
-  for (const { name, contentType } of DELIVERABLES) {
+  for (const { name, contentType } of deliverablesFor(projectId)) {
     const local = path.join(projectDir(projectId), name);
     if (!(await exists(local))) continue;
     if (remoteRow(projectId, name)) {
@@ -118,7 +180,7 @@ export async function offloadDeliverables(projectId: string, log: (m: string) =>
 /** Where each deliverable currently is, for the interface to show. */
 export function deliverableLocations(projectId: string) {
   const remote = new Set(remoteNames(projectId));
-  return DELIVERABLES.map(({ name, label }) => ({
+  return deliverablesFor(projectId).map(({ name, label }) => ({
     name,
     label,
     remote: remote.has(name),
