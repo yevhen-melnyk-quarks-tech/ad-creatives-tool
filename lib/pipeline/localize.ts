@@ -259,6 +259,12 @@ export async function runLocalize(opts: {
       if (!opts.force && (await ensureLocal(projectId, masterName, translated))) {
         log(`  reusing the translated master already on file — no HeyGen call`);
         reused = true;
+        // The captions have to come back too. They are a deliverable, so a previous
+        // run offloaded them to object storage and deleted the local copy — and
+        // burnAndFinish treats a missing SRT as "burn the descriptor only" rather
+        // than an error, so this silently produced a caption-less cut that still
+        // reported success. Found by watching the video, not by any check.
+        await ensureLocal(projectId, localizedCaptionName(language), srtPath);
       }
 
       //   2. We paid for it before but did not keep the file. HeyGen still serves a
@@ -349,6 +355,31 @@ export async function runLocalize(opts: {
           log("  no captions returned — the localized cut will carry the descriptor only");
           await rm(srtPath, { force: true });
         }
+      }
+
+      // Last resort for the captions: pull them from the translation we already paid
+      // for. Reached when the master was on the volume but the SRT was not, e.g. a
+      // "prune scratch" or a partial offload.
+      if (!(await exists(srtPath))) {
+        const priorId = priorTranslationId(projectId, language);
+        const prior = priorId ? await fetchTranslation(priorId, log).catch(() => null) : null;
+        if (prior?.srtUrl) {
+          const raw = path.join(workDir, "heygen.srt");
+          await download(prior.srtUrl, raw, "captions", log);
+          await writeText(srtPath, cuesToSrt(rechunkCues(parseSrt(await readText(raw)))));
+          log("  captions recovered from the paid translation");
+        }
+      }
+
+      // A localized cut with no captions is a defect, not a choice — unlike the
+      // English path, where a project may legitimately have none yet. Refusing here
+      // beats burning a caption-less cut that looks finished and reports success,
+      // which is exactly how this shipped once.
+      if (!(await exists(srtPath))) {
+        throw new Error(
+          `No captions available for ${language}. The translated SRT is neither on the volume nor recoverable ` +
+            `from the paid translation — re-run with "re-translate" to fetch a fresh one.`
+        );
       }
 
       // Translated after the footage is in hand rather than before, so a failure here

@@ -2,7 +2,7 @@ import { writeFile, mkdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { run, probe, exists, durationOf, videoInfo, freeBytes, THREADS } from "./ffmpeg";
 import { humanBytes } from "../paths";
-import { fitFontSize, textWidth } from "./fonts";
+import { fitFontSize } from "./fonts";
 
 // Delivered at 1080x1920, the resolution the reference ad ships at, not the video
 // model's native 720x1280. At 720p the logo had only 150px of detail; upscaled ~1.6x
@@ -364,36 +364,33 @@ export async function burnAndFinish(opts: BurnOptions): Promise<{ totalDurationS
     const ctaTxt = path.join(workDir, "cta.txt");
     await writeFile(ctaTxt, ctaText, "utf-8");
 
-    // Geometry measured off the reference ad's CTA, rescaled from 720 wide:
-    //   logo tile x 495-645, y 447-595 (150px square); "TRY NOW" cap height 55px ending
-    //   at x 465 (30px gap before the logo); chevrons y 675-890, centred.
-    const logoSize = px(150);
-    const rowY = px(447);
-    const gap = px(30);
-    const chevBaseY = rowY + px(228);
-
     /**
-     * The word and the logo are laid out as one centred block, measured here rather
-     * than anchored to a fixed logo position.
+     * The CTA is stacked, not a row: logo, then the words, then the chevrons.
      *
-     * The logo used to sit at a constant x with the text right-aligned against it via
-     * drawtext's `text_w`. That reads as centred only for a word the length of
-     * "TRY NOW": the moment localization put "PRUEBA AHORA" through it, the text grew
-     * leftward past x=0 and the ad shipped reading "UEBA AHORA". Now the pair is
-     * centred as a unit, and a word too wide even for the full frame shrinks to fit
-     * instead of being clipped — legible and whole beats on-brand-size and cut off.
+     * It used to be [text][logo] side by side, with the logo at a fixed x and the text
+     * right-aligned against it. That reads as centred only for a word about as wide as
+     * "TRY NOW" — the moment localization put "PRUEBA AHORA" through it the text grew
+     * leftward past x=0 and the ad shipped reading "UEBA AHORA". Centring the pair as a
+     * block fixed the clipping, but every longer locale then had to shrink to share the
+     * row with a 225px logo: "EXPERIMENTE AGORA" came out at 67px against English's 114.
+     *
+     * Stacking removes the competition entirely. The text gets the full frame width, so
+     * the common locales all draw at the same size as English, and the vertical order
+     * reads the way the frame is meant to be scanned: whose brand, what to do, where to
+     * tap. The measure-and-shrink guard stays as a backstop for an unusually long
+     * phrase, but it now almost never has to fire.
      */
-    const ctaMaxWidth = W - 2 * px(40) - logoSize - gap;
+    const logoSize = px(150);
+    // The stack is taller than the old row, so it starts higher to keep its centre of
+    // mass where the reference ad put it and stay clear of the descriptor at 0.795H.
+    const logoY = px(390);
+    const ctaY = logoY + logoSize + px(34);
+    const ctaMaxWidth = W - 2 * px(40);
     const ctaSize = fitFontSize(ctaText, px(76), ctaMaxWidth);
     if (ctaSize < px(76)) {
-      onLog?.(`  CTA "${ctaText}" is wide for this layout — drawn at ${ctaSize}px instead of ${px(76)}px`);
+      onLog?.(`  CTA "${ctaText}" is wide even for a full row — drawn at ${ctaSize}px instead of ${px(76)}px`);
     }
-    const ctaWidth = textWidth(ctaText, ctaSize) ?? ctaMaxWidth;
-    // Clamped so that a CTA longer than anything the prompt should produce still loses
-    // its tail rather than its opening letters — a reader can infer a clipped ending,
-    // not a clipped beginning.
-    const blockLeft = Math.max(0, Math.round((W - (ctaWidth + gap + logoSize)) / 2));
-    const logoX = Math.round(blockLeft + ctaWidth + gap);
+    const chevBaseY = ctaY + ctaSize + px(30);
 
     // ── 4. Story, CTA, join ──────────────────────────────────────────────────────
     //
@@ -451,10 +448,10 @@ export async function burnAndFinish(opts: BurnOptions): Promise<{ totalDurationS
       `[toblur]boxblur=luma_radius=${px(18)}:luma_power=2[blurred]`,
       `[clear][blurred]blend=all_expr='A*(1-min(1\\,T/1.1))+B*min(1\\,T/1.1)'[bg]`,
       `[1:v]scale=${logoSize}:${logoSize}[logo]`,
-      `[bg][logo]overlay=x=${logoX}:y=${rowY}:enable='gte(t,0.35)'[withlogo]`,
-      // Text is right-aligned to the logo via drawtext's text_w so the pair stays
-      // centred as a block regardless of the word used.
-      `[withlogo]drawtext=fontfile='${esc(FONT_BOLD)}':textfile='${esc(ctaTxt)}':fontsize=${ctaSize}:fontcolor=white:x=${blockLeft}:y=${rowY + px(30)}:shadowx=${px(2)}:shadowy=${px(2)}:shadowcolor=black@0.5:enable='gte(t,0.35)'[withtext]`,
+      `[bg][logo]overlay=x=(W-w)/2:y=${logoY}:enable='gte(t,0.35)'[withlogo]`,
+      // Centred on the frame, under the logo. drawtext's own text_w does the
+      // centring here, so a longer locale stays centred without any measurement.
+      `[withlogo]drawtext=fontfile='${esc(FONT_BOLD)}':textfile='${esc(ctaTxt)}':fontsize=${ctaSize}:fontcolor=white:x=(w-text_w)/2:y=${ctaY}:shadowx=${px(2)}:shadowy=${px(2)}:shadowcolor=black@0.5:enable='gte(t,0.35)'[withtext]`,
       // Descriptor redrawn crisply. The reference drops it on the CTA, but keeping the
       // AI disclosure across the whole ad is the safer call and costs nothing visually.
       ...discFilters.map((f, i) => {
