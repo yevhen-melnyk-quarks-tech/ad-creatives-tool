@@ -2,6 +2,7 @@ import { writeFile, mkdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { run, probe, exists, durationOf, videoInfo, freeBytes, THREADS } from "./ffmpeg";
 import { humanBytes } from "../paths";
+import { fitFontSize, textWidth } from "./fonts";
 
 // Delivered at 1080x1920, the resolution the reference ad ships at, not the video
 // model's native 720x1280. At 720p the logo had only 150px of detail; upscaled ~1.6x
@@ -368,8 +369,31 @@ export async function burnAndFinish(opts: BurnOptions): Promise<{ totalDurationS
     //   at x 465 (30px gap before the logo); chevrons y 675-890, centred.
     const logoSize = px(150);
     const rowY = px(447);
-    const logoX = px(490);
+    const gap = px(30);
     const chevBaseY = rowY + px(228);
+
+    /**
+     * The word and the logo are laid out as one centred block, measured here rather
+     * than anchored to a fixed logo position.
+     *
+     * The logo used to sit at a constant x with the text right-aligned against it via
+     * drawtext's `text_w`. That reads as centred only for a word the length of
+     * "TRY NOW": the moment localization put "PRUEBA AHORA" through it, the text grew
+     * leftward past x=0 and the ad shipped reading "UEBA AHORA". Now the pair is
+     * centred as a unit, and a word too wide even for the full frame shrinks to fit
+     * instead of being clipped — legible and whole beats on-brand-size and cut off.
+     */
+    const ctaMaxWidth = W - 2 * px(40) - logoSize - gap;
+    const ctaSize = fitFontSize(ctaText, px(76), ctaMaxWidth);
+    if (ctaSize < px(76)) {
+      onLog?.(`  CTA "${ctaText}" is wide for this layout — drawn at ${ctaSize}px instead of ${px(76)}px`);
+    }
+    const ctaWidth = textWidth(ctaText, ctaSize) ?? ctaMaxWidth;
+    // Clamped so that a CTA longer than anything the prompt should produce still loses
+    // its tail rather than its opening letters — a reader can infer a clipped ending,
+    // not a clipped beginning.
+    const blockLeft = Math.max(0, Math.round((W - (ctaWidth + gap + logoSize)) / 2));
+    const logoX = Math.round(blockLeft + ctaWidth + gap);
 
     // ── 4. Story, CTA, join ──────────────────────────────────────────────────────
     //
@@ -430,7 +454,7 @@ export async function burnAndFinish(opts: BurnOptions): Promise<{ totalDurationS
       `[bg][logo]overlay=x=${logoX}:y=${rowY}:enable='gte(t,0.35)'[withlogo]`,
       // Text is right-aligned to the logo via drawtext's text_w so the pair stays
       // centred as a block regardless of the word used.
-      `[withlogo]drawtext=fontfile='${esc(FONT_BOLD)}':textfile='${esc(ctaTxt)}':fontsize=${px(76)}:fontcolor=white:x=${logoX - px(30)}-text_w:y=${rowY + px(30)}:shadowx=${px(2)}:shadowy=${px(2)}:shadowcolor=black@0.5:enable='gte(t,0.35)'[withtext]`,
+      `[withlogo]drawtext=fontfile='${esc(FONT_BOLD)}':textfile='${esc(ctaTxt)}':fontsize=${ctaSize}:fontcolor=white:x=${blockLeft}:y=${rowY + px(30)}:shadowx=${px(2)}:shadowy=${px(2)}:shadowcolor=black@0.5:enable='gte(t,0.35)'[withtext]`,
       // Descriptor redrawn crisply. The reference drops it on the CTA, but keeping the
       // AI disclosure across the whole ad is the safer call and costs nothing visually.
       ...discFilters.map((f, i) => {
