@@ -4,6 +4,49 @@ All notable changes to this project are documented here. Format: dated entries,
 newest first, grouped as Added / Changed / Fixed / Removed. Versions track
 `package.json` — bumped by `/document` on every close-out.
 
+## 0.4.0 — 2026-09-12
+
+### Added
+- **Localization (step 5, optional).** Once an ad has tested well, it can be
+  translated into other markets: HeyGen produces a translated, lip-synced voiceover
+  from the clean master, then the tool re-burns its own captions, legal descriptor
+  and CTA, so each language comes out as a finished 1080x1920 cut rather than a raw
+  translation. Every localized cut is downloadable and shareable like any other
+  deliverable. Verified end to end on a real ad: 37 caption cues, correct house
+  style, CTA intact.
+- The language list is chosen once and reused by every project, in a new app-wide
+  `app_settings` table behind `GET/PUT /api/settings` — the first configuration in
+  this tool that is not scoped to a single project. The picker is populated live
+  from HeyGen's 190 languages.
+- `burnAndFinish()` — the upscale/burn/CTA tail of assembly, split out so the English
+  and localized cuts go through exactly one implementation and cannot drift apart.
+
+### Changed
+- `DELIVERABLES` became `deliverablesFor(projectId)`: the finished-file list is now
+  derived per project, so per-language cuts reach object storage and can be shared.
+  The static array silently excluded anything not named in it, across uploads, the
+  interface's file list and the share-link allowlist alike.
+- The jobs route now carries a `languages` payload; it previously dropped every field
+  except `sceneId`/`force`, so the request would have looked accepted and done nothing.
+- Duplicate-job coalescing compares languages as well as scene. Keyed on scene alone,
+  two runs for different languages both had `sceneId` null, so the second was
+  swallowed as a duplicate of the first and those markets never rendered.
+- `localize` shares `assemble`'s tighter concurrency cap: it ends by running the same
+  full-length encode, and two of those in a 1 GB container is how the encoder gets
+  SIGKILLed here.
+
+### Fixed
+- A HeyGen translation takes minutes, and `recoverOrphanedJobs` requeues any job
+  silent for 90 seconds — so every poll writes job progress. Without it a localization
+  job would have been requeued mid-flight and paid for a second time. Confirmed in
+  production: a run polled for 347 seconds without being reclaimed.
+- The translated video arrives carrying an embedded `mov_text` subtitle track (HeyGen
+  adds one when captions are enabled); it is explicitly dropped, or it would ride into
+  the deliverable as a soft track under the burned-in captions.
+- A missing `MASTER_clean.mp4` — legitimately skipped when the volume is tight at
+  assembly time — now explains itself and names the fix instead of failing as a
+  file-not-found.
+
 ## 0.3.1 — 2026-09-10
 
 ### Fixed

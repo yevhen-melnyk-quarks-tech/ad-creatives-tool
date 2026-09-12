@@ -16,10 +16,20 @@ import { fetchRetry, readJson } from "./http";
  *   - the finished payload also carries `audio_url` (the translated audio on its
  *     own), which the docs do not mention at all.
  *
- * Billing, also measured rather than assumed: a 4.04-second clip cost 4 credits,
- * where per-minute proration would have been ~0.34. HeyGen charges an effective
- * one-minute minimum per call, which is why this tool translates one whole master
- * per language instead of one call per clip — the latter measured ~3x dearer.
+ * This tool sends ONE whole master per language rather than one call per clip. The
+ * original reason given was cost, from a single 4-second probe that looked like a
+ * per-call minute floor; a second, longer run showed billing is roughly prorated per
+ * second instead, so per-clip would cost about the same. That argument was wrong.
+ *
+ * The reasons that do hold, and are the actual justification:
+ *   - `enable_dynamic_duration` re-times each translated video to fit its speech
+ *     (+12% on the probe). Applied per clip, each would stretch by a different
+ *     amount and the concatenated cut would drift out of sync with its own
+ *     storyboard; applied once to the whole master, the re-timing is coherent and
+ *     HeyGen's returned captions describe it exactly.
+ *   - voice consistency: one translation pass keeps one voice across the ad, where
+ *     fourteen independent passes can drift between clips.
+ *   - fourteen times fewer calls to poll, fail and pay for twice.
  */
 
 const BASE = "https://api.heygen.com";
@@ -32,25 +42,40 @@ const BASE = "https://api.heygen.com";
 export const TRANSLATE_MODE = process.env.HEYGEN_MODE ?? "speed";
 
 /**
- * Credits per minute of translated video, and what a credit costs.
+ * API credits per minute of translated video, and what an API credit costs.
  *
- * Both are ESTIMATES and deliberately configurable, the same treatment as
- * SEEDANCE_USD_PER_SEC_480: HeyGen's API does not report the price of a call, and
- * the published per-minute figures are for their web plans. The measured data point
- * is 4 credits for a 4-second clip, i.e. a ~1-minute floor per call. Set these from
- * a real invoice when one is available.
+ * ESTIMATES, deliberately configurable, the same treatment as SEEDANCE_USD_PER_SEC_480
+ * — and here the uncertainty is worse than usual, for a reason worth stating:
+ *
+ * HeyGen's API reports no price for a call and offers no usage-itemisation endpoint
+ * (every plausible path 404s), so the only way to measure a call's cost is the
+ * balance before and after. On a key SHARED with another product that is not a
+ * measurement, it is a difference of two numbers that anything on the account can
+ * move — and on this key it demonstrably does: 44 credits disappeared during a
+ * window in which this tool made no calls at all. Both figures below should be
+ * replaced from an invoice, or measured again on a key only this tool uses.
+ *
+ * Two confounded data points, for whoever revisits this: 4.1 seconds cost ~4 credits
+ * and ~44.5 seconds cost ~36, i.e. roughly 0.8 credits/second with no per-call
+ * minute floor. Their product below works out to ~$2/min, which is what HeyGen
+ * publishes for API video translation.
+ *
+ * Note that "5 credits per minute" appears in HeyGen's own material and is NOT this
+ * number: that is their WEB PLAN credit system, a different unit from API credits.
+ * Setting HEYGEN_CREDITS_PER_MIN to 5 would under-report spend roughly tenfold.
  */
-export const HEYGEN_CREDITS_PER_MIN = Number(process.env.HEYGEN_CREDITS_PER_MIN ?? 5);
-export const HEYGEN_USD_PER_CREDIT = Number(process.env.HEYGEN_USD_PER_CREDIT ?? 0.4);
+export const HEYGEN_CREDITS_PER_MIN = Number(process.env.HEYGEN_CREDITS_PER_MIN ?? 50);
+export const HEYGEN_USD_PER_CREDIT = Number(process.env.HEYGEN_USD_PER_CREDIT ?? 0.04);
 export const HEYGEN_RATE_IS_ESTIMATE =
   !process.env.HEYGEN_CREDITS_PER_MIN || !process.env.HEYGEN_USD_PER_CREDIT;
 
 /**
  * What one language of a given length will cost, in USD.
  *
- * Rounds up to a whole minute because that is what the billing probe showed: a
- * 4-second call was charged like a minute. Estimating any lower would let the budget
- * guard wave through a run it cannot afford.
+ * Rounded up to a whole minute. Billing looks prorated per second rather than floored
+ * at a minute, so this deliberately over-estimates — a budget guard that guesses low
+ * waves through the run it exists to stop, and the error is largest on short test
+ * clips where the absolute amount is trivial anyway.
  */
 export function estimateUsd(seconds: number): number {
   const minutes = Math.max(1, Math.ceil(seconds / 60));
