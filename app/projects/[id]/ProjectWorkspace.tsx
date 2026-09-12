@@ -23,6 +23,7 @@ type Job = {
 };
 type QaRow = { stage: string; scene_id: string | null; verdict: string; report: CriticReport };
 type Deliverable = { name: string; label: string; remote: boolean; bytes: number | null };
+type Overlay = { bold: string; body: string; cta: string; machine: boolean };
 type Version = {
   kind: string; sceneId: string | null; version: number; verdict: string | null;
   summary: string | null; suggestedNote: string | null;
@@ -1317,6 +1318,9 @@ function LocalizationPanel({
 }) {
   const [languages, setLanguages] = useState<string[]>([]);
   const [available, setAvailable] = useState<string[]>([]);
+  const [unsupportedCount, setUnsupportedCount] = useState(0);
+  const [supportedScripts, setSupportedScripts] = useState("");
+  const [overlays, setOverlays] = useState<Record<string, Overlay>>({});
   const [credits, setCredits] = useState<number | null>(null);
   const [configured, setConfigured] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1324,25 +1328,33 @@ function LocalizationPanel({
   const [filter, setFilter] = useState("");
   const [saving, setSaving] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [openOverlay, setOpenOverlay] = useState<string | null>(null);
+
+  // Applied from a promise callback rather than called straight out of the effect
+  // body: react-hooks/set-state-in-effect flags the latter, and that rule has caught
+  // real cascading-render bugs in this file before.
+  const apply = useCallback((d: Record<string, unknown>) => {
+    setLanguages((d.languages as string[]) ?? []);
+    setAvailable((d.available as string[]) ?? []);
+    setUnsupportedCount(((d.unsupported as string[]) ?? []).length);
+    setSupportedScripts((d.supportedScripts as string) ?? "");
+    setOverlays((d.overlays as Record<string, Overlay>) ?? {});
+    setCredits((d.credits as number | null) ?? null);
+    setConfigured(Boolean(d.configured));
+    setLoadError((d.error as string | null) ?? null);
+    setLoaded(true);
+  }, []);
+
+  const reload = useCallback(() => {
+    void fetch("/api/settings").then((r) => r.json()).then(apply).catch(() => {});
+  }, [apply]);
 
   useEffect(() => {
-    let cancelled = false;
     void fetch("/api/settings")
       .then((r) => r.json())
-      .then((d) => {
-        if (cancelled) return;
-        setLanguages(d.languages ?? []);
-        setAvailable(d.available ?? []);
-        setCredits(d.credits ?? null);
-        setConfigured(Boolean(d.configured));
-        setLoadError(d.error ?? null);
-        setLoaded(true);
-      })
-      .catch((e) => {
-        if (!cancelled) { setLoadError(String(e)); setLoaded(true); }
-      });
-    return () => { cancelled = true; };
-  }, []);
+      .then(apply)
+      .catch((e) => { setLoadError(String(e)); setLoaded(true); });
+  }, [apply]);
 
   async function save(next: string[]) {
     setSaving(true);
@@ -1443,7 +1455,51 @@ function LocalizationPanel({
                 ))
             )}
           </div>
+          {unsupportedCount > 0 && (
+            <p className="mt-2 border-t border-line pt-2 text-xs text-ink-subtle">
+              {unsupportedCount} further languages HeyGen offers are not listed: this tool bundles fonts for{" "}
+              {supportedScripts} only, and captions in another script would burn in as empty boxes.
+            </p>
+          )}
           {saving && <p className="mt-1 text-xs text-ink-subtle">Saving…</p>}
+        </div>
+      )}
+
+      {languages.length > 0 && (
+        <div className="mb-4">
+          <p className="mb-1 text-xs font-medium text-ink-muted">Burned-in text per language</p>
+          <p className="mb-2 max-w-2xl text-xs text-ink-subtle">
+            The disclaimer is a legal disclosure. It is translated once, automatically, then reused — check it before
+            the first run in a new market and correct anything that reads wrong.
+          </p>
+          <div className="flex flex-col gap-1">
+            {languages.map((l) => {
+              const o = overlays[l];
+              return (
+                <div key={l} className="rounded border border-line px-3 py-2 text-xs">
+                  <button
+                    onClick={() => setOpenOverlay(openOverlay === l ? null : l)}
+                    className="flex w-full items-center justify-between gap-3 text-left transition-opacity active:opacity-60"
+                  >
+                    <span className="flex items-baseline gap-2">
+                      <span className="font-medium">{l}</span>
+                      <span className="text-ink-subtle">
+                        {o ? `“${o.cta}” · ${o.bold}` : "not translated yet — will be on the first run"}
+                      </span>
+                    </span>
+                    {o?.machine && (
+                      <span className="shrink-0 rounded-full bg-warn-bg-strong px-2 py-0.5 text-warn-ink">
+                        not reviewed
+                      </span>
+                    )}
+                  </button>
+                  {openOverlay === l && o && (
+                    <OverlayEditor language={l} overlay={o} onSaved={reload} />
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -1488,6 +1544,66 @@ function LocalizationPanel({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Edits one language's burned-in text.
+ *
+ * Saving clears the "not reviewed" flag, which is the whole point: it is the record
+ * that a human has read the legal disclosure in that language, not just that a model
+ * produced one.
+ */
+function OverlayEditor({
+  language, overlay, onSaved,
+}: { language: string; overlay: Overlay; onSaved: () => void }) {
+  const [bold, setBold] = useState(overlay.bold);
+  const [body, setBody] = useState(overlay.body);
+  const [cta, setCta] = useState(overlay.cta);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const dirty = bold !== overlay.bold || body !== overlay.body || cta !== overlay.cta;
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    const res = await fetch("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ overlay: { language, bold, body, cta } }),
+    });
+    const d = await res.json().catch(() => ({}));
+    setSaving(false);
+    if (!res.ok) { setError(d.error ?? "Could not save"); return; }
+    onSaved();
+  }
+
+  const field = "w-full rounded border border-line bg-transparent px-2 py-1 text-xs";
+  return (
+    <div className="mt-2 flex flex-col gap-2 border-t border-line pt-2">
+      <label className="flex flex-col gap-1">
+        <span className="text-ink-subtle">Disclaimer, bold line</span>
+        <input value={bold} onChange={(e) => setBold(e.target.value)} className={field} />
+      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-ink-subtle">Disclaimer, body</span>
+        <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={2} className={field} />
+      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-ink-subtle">Call to action</span>
+        <input value={cta} onChange={(e) => setCta(e.target.value)} className={field} />
+      </label>
+      {error && <p className="text-warn-ink">{error}</p>}
+      <div className="flex items-center gap-2">
+        <Btn small onClick={() => void save()} busy={saving} disabled={!dirty && !overlay.machine}>
+          {overlay.machine && !dirty ? "Mark as reviewed" : "Save"}
+        </Btn>
+        <span className="text-ink-subtle">
+          Applies to every project localized into {language} from now on.
+        </span>
+      </div>
     </div>
   );
 }

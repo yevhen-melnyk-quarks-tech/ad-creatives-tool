@@ -5,6 +5,8 @@ import { recordCost, projectSpendUsd, reserveSpend, releaseSpend, setProgress } 
 import { burnAndFinish } from "../media/assemble";
 import { durationOf, exists } from "../media/ffmpeg";
 import { MAX_CHUNK_WORDS, MAX_CHUNK_SECONDS, srtTime } from "./captions";
+import { overlayFor } from "./overlays";
+import { missingGlyphs, renderableLanguage, SUPPORTED_SCRIPT_NAMES } from "../media/fonts";
 import {
   createTranslations, awaitTranslation, download, estimateUsd, heygenConfigured,
 } from "../models/heygen";
@@ -161,6 +163,17 @@ export async function runLocalize(opts: {
   if (!heygenConfigured()) throw new Error("HEYGEN_API_KEY is not set — cannot localize.");
   if (languages.length === 0) throw new Error("No languages selected. Choose them in the localization section first.");
 
+  // Checked before a single paid call, not per language as they run: the burned text
+  // for an unsupported script renders as empty boxes, and finding that out after
+  // HeyGen has translated the video means paying for a cut that can never be used.
+  const unrenderable = languages.filter((l) => !renderableLanguage(l));
+  if (unrenderable.length) {
+    throw new Error(
+      `Cannot render ${unrenderable.join(", ")}: this tool bundles fonts for ${SUPPORTED_SCRIPT_NAMES} only, ` +
+        `and captions in another script would burn in as empty boxes. Remove those languages, or add a font that covers them.`
+    );
+  }
+
   const masterUrl = await publicMasterUrl(projectId, log);
 
   // Priced off the master's real duration when it is still on disk; otherwise off the
@@ -235,6 +248,18 @@ export async function runLocalize(opts: {
 
       if (!done.videoUrl) throw new Error(`HeyGen reported ${done.status} but returned no video URL`);
 
+      // Translated after the video is in hand rather than before, so a failure here
+      // never wastes a paid translation: the overlay call is cents, the HeyGen one
+      // is not. Cached per language, so this is one text call the first time a market
+      // is localized and free every time after.
+      const overlay = await overlayFor({
+        language,
+        bold: opts.disclaimerBold ?? "AI-generated.",
+        body: opts.disclaimerRegular ?? "Fictional story. Results not typical and may vary.",
+        cta: opts.ctaText ?? "TRY NOW",
+        onLog: log,
+      });
+
       const workDir = path.join(projectDir(projectId), "_work", `loc_${uid()}`);
       const translated = path.join(workDir, "translated.mp4");
       const srtPath = path.join(projectDir(projectId), localizedCaptionName(language));
@@ -248,6 +273,20 @@ export async function runLocalize(opts: {
           const raw = path.join(workDir, "heygen.srt");
           await download(done.srtUrl, raw, "translated captions", log);
           const cues = rechunkCues(parseSrt(await readText(raw)));
+
+          // The captions are the largest body of translated text on screen and the
+          // likeliest place a stray unsupported character turns up. ffmpeg draws
+          // those as empty boxes without erroring, so a cut can otherwise come out
+          // looking finished with rows of tofu across it.
+          const missing = missingGlyphs(cues.map((c) => c.text).join(""));
+          if (missing.length) {
+            throw new Error(
+              `The ${language} captions use characters the bundled font cannot draw ` +
+                `(${missing.slice(0, 8).join(" ")}) — they would burn in as empty boxes. ` +
+                `This language needs a font this tool does not ship.`
+            );
+          }
+
           await writeText(srtPath, cuesToSrt(cues));
           log(`  captions: ${cues.length} cues re-chunked to house style`);
         } else {
@@ -262,9 +301,10 @@ export async function runLocalize(opts: {
           srtPath,
           outPath,
           workDir: path.join(workDir, "burn"),
-          disclaimerBold: opts.disclaimerBold,
-          disclaimerRegular: opts.disclaimerRegular,
-          ctaText: opts.ctaText,
+          // The localized overlay text, not the English source.
+          disclaimerBold: overlay.bold,
+          disclaimerRegular: overlay.body,
+          ctaText: overlay.cta,
           onLog: log,
           onProgress: (f) =>
             setProgress(opts.jobId ?? "", `${language}: burning (${Math.round(f * 100)}%)`, i, languages.length),

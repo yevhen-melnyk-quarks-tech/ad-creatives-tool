@@ -4,6 +4,26 @@ All notable changes to this project are documented here. Format: dated entries,
 newest first, grouped as Added / Changed / Fixed / Removed. Versions track
 `package.json` — bumped by `/document` on every close-out.
 
+## 0.4.1 — 2026-09-12
+
+### Added
+- The burned-in disclaimer and CTA are now localized too, so a localized cut carries
+  no English text at all. Translated once per language and stored, not re-translated
+  per render: the descriptor is a regulatory disclosure, so it is editable in the
+  localization section and marked "not reviewed" until a human has confirmed it.
+  The CTA is prompted for idiomatic ad copy rather than a literal translation
+  ("TRY NOW" → "PRUEBA AHORA", "JETZT TESTEN", "WYPRÓBUJ TERAZ").
+
+### Fixed
+- **Localizing into Japanese, Chinese, Arabic, Korean, Thai or Hindi produced a
+  finished-looking video with rows of empty boxes where the captions should be.**
+  ffmpeg's `drawtext` and `subtitles` do not error on a missing glyph, they draw
+  tofu — so the failure was silent, and HeyGen had already been paid for the
+  translation. The bundled Roboto covers Latin, Cyrillic and Greek only. Two guards
+  now: the language picker lists the 125 markets that can be rendered and says why
+  the other 65 are missing, and the text actually about to be burned is checked
+  against the font's own glyph table before any paid call is made.
+
 ## 0.4.0 — 2026-09-12
 
 ### Added
