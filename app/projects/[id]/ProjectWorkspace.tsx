@@ -121,12 +121,12 @@ export default function ProjectWorkspace(props: {
     return () => clearInterval(t);
   }, [refresh]);
 
-  async function startJob(kind: string, sceneId?: string, note?: string, languages?: string[]) {
+  async function startJob(kind: string, sceneId?: string, note?: string, languages?: string[], force?: boolean) {
     setBusy(sceneId ? `${kind}:${sceneId}` : kind);
     const res = await fetch(`/api/projects/${projectId}/jobs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind, sceneId, note, languages }),
+      body: JSON.stringify({ kind, sceneId, note, languages, force }),
     });
     const data = await res.json().catch(() => ({}));
     // Say so out loud when a click landed on work already in flight. Silence here is
@@ -879,7 +879,7 @@ export default function ProjectWorkspace(props: {
               hasFinal={Boolean(find("final") || props.status === "complete")}
               running={jobs.find((j) => j.kind === "localize" && (j.status === "running" || j.status === "queued")) ?? null}
               busy={busy === "localize"}
-              onStart={(languages) => startJob("localize", undefined, undefined, languages)}
+              onStart={(languages, force) => startJob("localize", undefined, undefined, languages, force)}
               isRemote={isRemote}
             />
           </Step>
@@ -1313,7 +1313,7 @@ function LocalizationPanel({
   hasFinal: boolean;
   running: Job | null;
   busy: boolean;
-  onStart: (languages: string[]) => void;
+  onStart: (languages: string[], force?: boolean) => void;
   isRemote: (name: string) => boolean;
 }) {
   const [languages, setLanguages] = useState<string[]>([]);
@@ -1371,6 +1371,14 @@ function LocalizationPanel({
   // app-wide list never hides a cut that was already produced and paid for.
   const localized = deliverables.filter((d) => d.name.startsWith("FINAL_"));
   const doneFor = new Set(localized.map((d) => d.name));
+
+  // Languages whose translated master is already on file: re-rendering those costs an
+  // ffmpeg pass, not another paid translation. Worth saying out loud, because the
+  // whole point of keeping the master is that editing the burned-in text is free.
+  const haveMaster = new Set(
+    deliverables.filter((d) => d.name.startsWith("MASTER_") && d.name !== "MASTER_clean.mp4").map((d) => d.name)
+  );
+  const freeToReburn = languages.filter((l) => haveMaster.has(`MASTER_${slugForDisplay(l)}.mp4`));
 
   if (!hasFinal) {
     return (
@@ -1514,10 +1522,17 @@ function LocalizationPanel({
         {credits !== null && (
           <span className="text-xs text-ink-subtle">
             {credits.toLocaleString()} HeyGen credits left
-            {languages.length > 0 && ` · this run bills per minute, per language`}
+            {freeToReburn.length > 0 && ` · ${freeToReburn.length} already translated, free to re-render`}
           </span>
         )}
       </div>
+      {freeToReburn.length > 0 && (
+        <p className="mt-2 text-xs text-ink-subtle">
+          {freeToReburn.join(", ")} {freeToReburn.length === 1 ? "has" : "have"} a translated master on file, so
+          re-running costs nothing — use it after editing the disclaimer or call to action above. Re-translating
+          from scratch is only needed if the English cut itself changed.
+        </p>
+      )}
 
       {running && (
         <p className="mt-3 text-xs text-ink-subtle">

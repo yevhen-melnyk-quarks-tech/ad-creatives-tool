@@ -1,16 +1,16 @@
 import { rm } from "node:fs/promises";
 import path from "node:path";
 import { artifact, projectDir, safeSceneId } from "../paths";
-import { recordCost, projectSpendUsd, reserveSpend, releaseSpend, setProgress } from "../db";
+import { db, recordCost, projectSpendUsd, reserveSpend, releaseSpend, setProgress } from "../db";
 import { burnAndFinish } from "../media/assemble";
 import { durationOf, exists } from "../media/ffmpeg";
 import { MAX_CHUNK_WORDS, MAX_CHUNK_SECONDS, srtTime } from "./captions";
 import { overlayFor } from "./overlays";
 import { missingGlyphs, renderableLanguage, SUPPORTED_SCRIPT_NAMES } from "../media/fonts";
 import {
-  createTranslations, awaitTranslation, download, estimateUsd, heygenConfigured,
+  createTranslations, awaitTranslation, fetchTranslation, download, estimateUsd, heygenConfigured,
 } from "../models/heygen";
-import { localizedVideoName, localizedCaptionName, offloadDeliverables } from "../storage/deliverables";
+import { localizedVideoName, localizedCaptionName, localizedMasterName, offloadDeliverables } from "../storage/deliverables";
 import { r2Config, presignGet, objectKey, putFile } from "../storage/r2";
 import { remoteRow } from "../storage/deliverables";
 import { uid } from "../db";
@@ -140,7 +140,39 @@ async function publicMasterUrl(projectId: string, log: (m: string) => void): Pro
   return presignGet(c, key, 6 * 3600);
 }
 
-export type LocalizeOutcome = { language: string; ok: boolean; file?: string; error?: string };
+/**
+ * The translation id we already paid for in this project and language, if any.
+ *
+ * Recorded as the `detail` of the HeyGen cost row. HeyGen keeps a completed
+ * translation retrievable by id indefinitely, so a project whose translated master
+ * was never kept — every run before that was added — can still be re-burned for free
+ * instead of paying for byte-identical output a second time.
+ */
+function priorTranslationId(projectId: string, language: string): string | null {
+  const row = db()
+    .prepare(
+      `SELECT detail FROM costs
+        WHERE project_id = ? AND provider = 'heygen' AND operation = ?
+          AND detail IS NOT NULL
+        ORDER BY created_at DESC, rowid DESC LIMIT 1`
+    )
+    .get(projectId, `translate-${safeSceneId(language)}`) as { detail: string } | undefined;
+  return row?.detail ?? null;
+}
+
+/** Pulls an offloaded file back to the volume so ffmpeg can read it. */
+async function ensureLocal(projectId: string, name: string, dest: string): Promise<boolean> {
+  if (await exists(dest)) return true;
+  const c = r2Config();
+  const row = remoteRow(projectId, name);
+  if (!c || !row) return false;
+  await download(presignGet(c, row.object_key, 3600), dest, name);
+  return true;
+}
+
+const SUCCESSFUL = (s: string) => s === "completed" || s === "success";
+
+export type LocalizeOutcome = { language: string; ok: boolean; file?: string; error?: string; reused?: boolean };
 
 /**
  * Translates a finished ad into each language and re-renders a full localized cut.
@@ -154,6 +186,8 @@ export async function runLocalize(opts: {
   languages: string[];
   log: (m: string) => void;
   jobId?: string;
+  /** Re-translate even when a kept master or a prior paid translation exists. */
+  force?: boolean;
   disclaimerBold?: string;
   disclaimerRegular?: string;
   ctaText?: string;
@@ -210,62 +244,84 @@ export async function runLocalize(opts: {
     // Reserved around the whole language so a concurrently running job sees this
     // spend in the budget guard rather than passing a stale check.
     reserveSpend(projectId, perLanguageUsd);
+    const workDir = path.join(projectDir(projectId), "_work", `loc_${uid()}`);
+    const masterName = localizedMasterName(language);
+    const translated = path.join(projectDir(projectId), masterName);
+    const srtPath = path.join(projectDir(projectId), localizedCaptionName(language));
+    const outPath = path.join(projectDir(projectId), localizedVideoName(language));
+
     try {
-      const [id] = await createTranslations({
-        videoUrl: masterUrl,
-        languages: [language],
-        title: `${projectId} — ${language}`,
-        onLog: log,
-      });
-      log(`  translation ${id} started`);
+      // Three ways to get the translated footage, cheapest first. Only the last one
+      // costs money, and reaching it should be the exception rather than the rule.
+      let reused = false;
 
-      const done = await awaitTranslation({
-        id,
-        onLog: log,
-        // Every poll writes progress. This is the load-bearing line of the whole
-        // feature: recoverOrphanedJobs requeues a running job that has been silent
-        // for 90 seconds, a translation takes minutes, and a requeued job would
-        // start — and pay for — the translation all over again.
-        onTick: (status, elapsed) => {
-          setProgress(
-            opts.jobId ?? "",
-            `${language}: ${status} (${Math.round(elapsed)}s)`,
-            i,
-            languages.length
-          );
-        },
-      });
+      //   1. We already keep it. Re-burning with new overlay text is then free.
+      if (!opts.force && (await ensureLocal(projectId, masterName, translated))) {
+        log(`  reusing the translated master already on file — no HeyGen call`);
+        reused = true;
+      }
 
-      // Billed on completion rather than on submission: a translation that never
-      // completes is reported by awaitTranslation's throw, which names the id.
-      recordCost({
-        projectId,
-        provider: "heygen",
-        operation: `translate-${safeSceneId(language)}`,
-        usd: perLanguageUsd,
-        detail: id,
-      });
+      //   2. We paid for it before but did not keep the file. HeyGen still serves a
+      //      completed translation by id, so recover it rather than buying it twice.
+      //      This is what makes projects localized before masters were kept free to
+      //      re-burn, and it is the same idea as recoverVideo() for Replicate.
+      if (!reused && !opts.force) {
+        const priorId = priorTranslationId(projectId, language);
+        if (priorId) {
+          log(`  a translation of this project was already paid for (${priorId}) — recovering it`);
+          const prior = await fetchTranslation(priorId, log).catch(() => null);
+          if (prior?.videoUrl && SUCCESSFUL(prior.status)) {
+            await download(prior.videoUrl, translated, "recovered translated video", log);
+            if (prior.srtUrl && !(await exists(srtPath))) {
+              const raw = path.join(workDir, "heygen.srt");
+              await download(prior.srtUrl, raw, "recovered captions", log);
+              await writeText(srtPath, cuesToSrt(rechunkCues(parseSrt(await readText(raw)))));
+            }
+            reused = true;
+          } else {
+            log(`  could not recover it (${prior?.status ?? "unreadable"}) — translating again`);
+          }
+        }
+      }
 
-      if (!done.videoUrl) throw new Error(`HeyGen reported ${done.status} but returned no video URL`);
+      //   3. Nothing to reuse: pay for a translation.
+      if (!reused) {
+        const [id] = await createTranslations({
+          videoUrl: masterUrl,
+          languages: [language],
+          title: `${projectId} — ${language}`,
+          onLog: log,
+        });
+        log(`  translation ${id} started`);
 
-      // Translated after the video is in hand rather than before, so a failure here
-      // never wastes a paid translation: the overlay call is cents, the HeyGen one
-      // is not. Cached per language, so this is one text call the first time a market
-      // is localized and free every time after.
-      const overlay = await overlayFor({
-        language,
-        bold: opts.disclaimerBold ?? "AI-generated.",
-        body: opts.disclaimerRegular ?? "Fictional story. Results not typical and may vary.",
-        cta: opts.ctaText ?? "TRY NOW",
-        onLog: log,
-      });
+        const done = await awaitTranslation({
+          id,
+          onLog: log,
+          // Every poll writes progress. This is the load-bearing line of the whole
+          // feature: recoverOrphanedJobs requeues a running job that has been silent
+          // for 90 seconds, a translation takes minutes, and a requeued job would
+          // start — and pay for — the translation all over again.
+          onTick: (status, elapsed) => {
+            setProgress(
+              opts.jobId ?? "",
+              `${language}: ${status} (${Math.round(elapsed)}s)`,
+              i,
+              languages.length
+            );
+          },
+        });
 
-      const workDir = path.join(projectDir(projectId), "_work", `loc_${uid()}`);
-      const translated = path.join(workDir, "translated.mp4");
-      const srtPath = path.join(projectDir(projectId), localizedCaptionName(language));
-      const outPath = path.join(projectDir(projectId), localizedVideoName(language));
+        // Billed on completion rather than on submission: a translation that never
+        // completes is reported by awaitTranslation's throw, which names the id.
+        recordCost({
+          projectId,
+          provider: "heygen",
+          operation: `translate-${safeSceneId(language)}`,
+          usd: perLanguageUsd,
+          detail: id,
+        });
 
-      try {
+        if (!done.videoUrl) throw new Error(`HeyGen reported ${done.status} but returned no video URL`);
         log("  downloading the translated cut...");
         await download(done.videoUrl, translated, "translated video", log);
 
@@ -293,11 +349,25 @@ export async function runLocalize(opts: {
           log("  no captions returned — the localized cut will carry the descriptor only");
           await rm(srtPath, { force: true });
         }
+      }
 
+      // Translated after the footage is in hand rather than before, so a failure here
+      // never wastes a paid translation: the overlay call is cents, the HeyGen one is
+      // not. Cached per language, so this is one text call the first time a market is
+      // localized and free every time after — including on a re-burn.
+      const overlay = await overlayFor({
+        language,
+        bold: opts.disclaimerBold ?? "AI-generated.",
+        body: opts.disclaimerRegular ?? "Fictional story. Results not typical and may vary.",
+        cta: opts.ctaText ?? "TRY NOW",
+        onLog: log,
+      });
+
+      try {
         await burnAndFinish({
           inputArgs: ["-i", translated],
           lastFrameSource: translated,
-          storyDurationSeconds: done.durationSeconds ?? seconds,
+          storyDurationSeconds: await durationOf(translated).catch(() => seconds),
           srtPath,
           outPath,
           workDir: path.join(workDir, "burn"),
@@ -314,13 +384,14 @@ export async function runLocalize(opts: {
       }
 
       // Offloaded per language rather than once at the end, so peak disk is one
-      // localized cut rather than all of them.
+      // localized cut rather than all of them. The translated master goes with it, so
+      // the next re-burn costs nothing.
       await offloadDeliverables(projectId, log).catch((e) =>
         log(`  could not move ${language} to object storage (${(e as Error).message}) — it is still on the volume`)
       );
 
-      results.push({ language, ok: true, file: localizedVideoName(language) });
-      log(`  ${language} done`);
+      results.push({ language, ok: true, file: localizedVideoName(language), reused });
+      log(`  ${language} done${reused ? " (no HeyGen charge)" : ""}`);
     } catch (e) {
       // One language failing must not abandon the rest: they are independent, and the
       // ones that succeeded are finished ads the designer can use today.

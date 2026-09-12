@@ -46,6 +46,17 @@ export const localizedVideoName = (language: string) => `FINAL_${localeSlug(lang
 export const localizedCaptionName = (language: string) => `captions_${localeSlug(language)}.srt`;
 
 /**
+ * HeyGen's translated cut, kept rather than discarded.
+ *
+ * The same idea as MASTER_clean.mp4 one level down: translated audio and lip-sync,
+ * no burned text. Keeping it means re-burning a localized cut — new CTA wording, a
+ * corrected legal disclaimer, a caption tweak — costs an ffmpeg pass instead of
+ * another paid translation. It used to be written to a scratch directory and deleted
+ * in a `finally`, so every edit meant paying HeyGen again for byte-identical output.
+ */
+export const localizedMasterName = (language: string) => `MASTER_${localeSlug(language)}.mp4`;
+
+/**
  * Every deliverable this project actually has, static plus localized.
  *
  * The static list alone was the single biggest structural obstacle to localization:
@@ -63,16 +74,20 @@ export function deliverablesFor(projectId: string): Deliverable[] {
   for (const name of localFileNames(projectId)) present.add(name);
 
   const localized = [...present]
-    .filter((n) => n.startsWith("FINAL_") || n.startsWith("captions_"))
+    .filter((n) => /^(FINAL_|captions_|MASTER_)/.test(n) && n !== "MASTER_clean.mp4")
     .sort()
     .map((name) => {
-      const slug = name.replace(/^(FINAL_|captions_)/, "").replace(/\.(mp4|srt)$/, "");
+      const slug = name.replace(/^(FINAL_|captions_|MASTER_)/, "").replace(/\.(mp4|srt)$/, "");
       const language = slug.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-      const isVideo = name.endsWith(".mp4");
+      const kind = name.startsWith("FINAL_")
+        ? "Final cut"
+        : name.startsWith("MASTER_")
+          ? "Translated master"
+          : "Captions";
       return {
         name,
-        contentType: isVideo ? "video/mp4" : "text/plain; charset=utf-8",
-        label: `${isVideo ? "Final cut" : "Captions"} — ${language}`,
+        contentType: name.endsWith(".mp4") ? "video/mp4" : "text/plain; charset=utf-8",
+        label: `${kind} — ${language}`,
       };
     });
 

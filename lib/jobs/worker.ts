@@ -483,6 +483,7 @@ async function execute(
         languages,
         log,
         jobId,
+        force: payload.force === true,
         disclaimerBold: disclaimer.bold,
         disclaimerRegular: disclaimer.body,
       });
